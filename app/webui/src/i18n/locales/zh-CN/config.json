@@ -1,0 +1,89 @@
+{
+  "section": {
+    "targetMatrix": {
+      "title": "目标配置",
+      "description": "平台、模式与搜索参数"
+    },
+    "authMatrix": {
+      "title": "登录配置",
+      "description": "登录方式配置"
+    },
+    "outputConfig": {
+      "title": "输出配置",
+      "description": "保存格式与评论选项"
+    },
+    "runtime": {
+      "title": "运行参数",
+      "description": "运行时参数"
+    }
+  },
+  "field": {
+    "platform": "平台",
+    "platformPlaceholder": "选择平台",
+    "crawlType": "爬取类型",
+    "crawlTypePlaceholder": "选择类型",
+    "startPage": "起始页",
+    "keywords": "关键词",
+    "keywordsHint": "输入关键词后按回车添加",
+    "keywordsPlaceholder": "输入关键词，按回车添加...",
+    "specifiedIds": "帖子/视频 ID",
+    "specifiedIdsHint": "输入帖子或视频的ID/URL，每行一个或用逗号分隔",
+    "specifiedIdsPlaceholder": {
+      "bili": "示例:\nBV1xxxx\nhttps://www.bilibili.com/video/BV1xxxx",
+      "xhs": "示例:\nhttps://www.xiaohongshu.com/explore/xxx?xsec_token=xxx\n(必须包含xsec_token参数)",
+      "dy": "示例:\n7525538910311632128\nhttps://www.douyin.com/video/xxx\nhttps://v.douyin.com/xxx (短链接)",
+      "wb": "示例:\n4982041758140155\nhttps://weibo.com/xxx/xxx",
+      "ks": "示例:\n3xf8enb8dbj6uig\nhttps://www.kuaishou.com/short-video/xxx",
+      "default": "输入帖子/视频 ID 或 URL..."
+    },
+    "creatorIds": "创作者 ID",
+    "creatorIdsHint": "输入创作者的ID/URL，每行一个或用逗号分隔",
+    "creatorIdsPlaceholder": {
+      "bili": "示例:\n434377496\nhttps://space.bilibili.com/434377496",
+      "xhs": "示例:\nhttps://www.xiaohongshu.com/user/profile/xxx?xsec_token=xxx\n(必须包含xsec_token参数)",
+      "dy": "示例:\nMS4wLjABAAAAxxx\nhttps://www.douyin.com/user/MS4wLjABAAAAxxx",
+      "wb": "示例:\n5533390220\nhttps://weibo.com/u/5533390220",
+      "ks": "示例:\n3x84qugg4ch9zhs\nhttps://www.kuaishou.com/profile/xxx",
+      "default": "输入创作者 ID 或 URL..."
+    },
+    "loginMethod": "登录方式",
+    "loginMethodPlaceholder": "选择登录方式",
+    "cookies": "Cookies",
+    "cookiesHint": "粘贴 Cookie 字符串",
+    "cookiesPlaceholder": "在此粘贴 Cookies...",
+    "saveFormat": "保存格式",
+    "saveFormatHint": "大任务建议 JSONL 或 SQLite，避免反复重写整个 JSON 文件。",
+    "saveFormatPlaceholder": "选择格式",
+    "commentExtraction": "评论抓取",
+    "subComments": "子评论",
+    "downloadMedia": "下载媒体",
+    "downloadMediaHint": "下载封面与视频（图文笔记下载图片），支持小红书/抖音/快手/B站/微博",
+    "stopCondition": "停止条件",
+    "stopConditionHint": "小红书搜索可采集到没有更多帖子；其他模式使用数量上限。错误或访问限制会停止并提示。",
+    "stopAtCount": "达到数量上限，或提前没有数据",
+    "stopWhenExhausted": "没有更多帖子时停止",
+    "maxNotes": "帖子数量上限（每个关键词／创作者）",
+    "maxNotesHint": "1–1000000；按关键词／创作者计算。数量较大时自动降低频率。",
+    "maxComments": "每帖一级评论上限",
+    "maxCommentsHint": "1–1000000；评论不足时提前结束。子评论另按开关采集。",
+    "rateMode": "请求频率策略",
+    "rateAuto": "自动：大任务降速",
+    "rateGentle": "始终使用低频模式",
+    "requestInterval": "请求间隔（秒）",
+    "restEvery": "每多少次请求休息",
+    "restSeconds": "休息时长（秒）",
+    "rateHint": "单任务并发 1。达到 1 万条、帖子×评论预计达到 1 万或无上限模式时，间隔至少 5 秒并定期休息。小红书逐请求限速，其他平台使用页面／评论间隔。遇限流或验证停止；不能保证不封禁。",
+    "headlessMode": "无头模式",
+    "headlessModeHint": "无 GUI 运行浏览器"
+  },
+  "button": {
+    "initiateScan": "开始爬虫",
+    "initiating": "启动中...",
+    "terminate": "终止",
+    "stopping": "停止中..."
+  },
+  "warning": {
+    "cookieSlider": "[提示] 小红书和抖音平台不建议使用 Cookie 登录，因为可能会触发滑块验证",
+    "xhsToken": "[重要] 小红书 URL 必须包含 xsec_token 参数，请从浏览器复制完整 URL"
+  }
+}
