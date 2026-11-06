@@ -10,7 +10,7 @@ export default defineConfig({
     },
   },
   build: {
-    rollupOptions: { input: { main: path.resolve(__dirname, 'index.html'), library: path.resolve(__dirname, 'library.html') } },
+    rollupOptions: { input: { main: path.resolve(__dirname, 'index.html'), library: path.resolve(__dirname, 'library.html'), research: path.resolve(__dirname, 'research.html') } },
     outDir: '../api/webui',
     emptyOutDir: true,
   },

@@ -57,6 +57,11 @@ def status():
     return store.status()
 
 
+@app.get('/api/library/batches')
+def batches():
+    return store.batches()
+
+
 @app.post('/api/library/sync',status_code=202)
 def sync():
     media_requested.set()
@@ -64,17 +69,17 @@ def sync():
     return {'queued':True}
 
 
-def filters(q='',exclude='',platform='',kind='',keyword='',min_likes=0,min_collects=0,min_comments=0,since='',until='',images=False,saved=False,show_hidden=False,tag='',sort='recent'):
+def filters(q='',exclude='',platform='',kind='',keyword='',min_likes=0,min_collects=0,min_comments=0,since='',until='',images=False,saved=False,show_hidden=False,tag='',sort='recent',run_id=''):
     return dict(q=q,exclude=exclude,platform=platform,kind=kind,keyword=keyword,min_likes=min_likes,min_collects=min_collects,
-                min_comments=min_comments,since=since,until=until,images=images,saved=saved,show_hidden=show_hidden,tag=tag,sort=sort)
+                min_comments=min_comments,since=since,until=until,images=images,saved=saved,show_hidden=show_hidden,tag=tag,sort=sort,run_id=run_id)
 
 
 @app.get('/api/library/posts')
 def posts(q:str=Query('',max_length=200),exclude:str=Query('',max_length=200),platform:str='',kind:str='',keyword:str='',
           min_likes:int=Query(0,ge=0),min_collects:int=Query(0,ge=0),min_comments:int=Query(0,ge=0),since:str='',until:str='',
-          images:bool=False,saved:bool=False,show_hidden:bool=False,tag:str='',sort:str='recent',cursor:str='',limit:int=Query(24,ge=1,le=100)):
+          images:bool=False,saved:bool=False,show_hidden:bool=False,tag:str='',sort:str='recent',cursor:str='',limit:int=Query(24,ge=1,le=100),run_id:str=''):
     try:
-        return store.list_posts(filters(q,exclude,platform,kind,keyword,min_likes,min_collects,min_comments,since,until,images,saved,show_hidden,tag,sort),cursor,limit)
+        return store.list_posts(filters(q,exclude,platform,kind,keyword,min_likes,min_collects,min_comments,since,until,images,saved,show_hidden,tag,sort,run_id),cursor,limit)
     except (ValueError,KeyError,TypeError):
         raise HTTPException(400,'筛选条件或翻页位置无效，请重新筛选')
 
@@ -137,15 +142,17 @@ def media(platform:str,pid:str,name:str,thumb:bool=False):
 
 @app.get('/api/library/export')
 def export(q:str='',exclude:str='',platform:str='',kind:str='',keyword:str='',min_likes:int=0,min_collects:int=0,min_comments:int=0,
-           since:str='',until:str='',images:bool=False,saved:bool=False,show_hidden:bool=False,tag:str='',sort:str='recent'):
+           since:str='',until:str='',images:bool=False,saved:bool=False,show_hidden:bool=False,tag:str='',sort:str='recent',run_id:str=''):
     try:
-        where,args = store.filters(filters(q,exclude,platform,kind,keyword,min_likes,min_collects,min_comments,since,until,images,saved,show_hidden,tag,sort))
+        where,args = store.filters(filters(q,exclude,platform,kind,keyword,min_likes,min_collects,min_comments,since,until,images,saved,show_hidden,tag,sort,run_id))
     except ValueError:
         raise HTTPException(400,'日期或数量条件无效')
     def generate():
         buf = StringIO()
         writer = csv.writer(buf)
         columns = ['platform','post_id','title','body','author','published_at','likes','collects','comments','original_url','user_tags','note']
+        if run_id:
+            columns = ['run_id'] + columns
         writer.writerow(columns)
         yield '\ufeff'+buf.getvalue()
         with store.connect() as db:
@@ -156,7 +163,7 @@ def export(q:str='',exclude:str='',platform:str='',kind:str='',keyword:str='',mi
                     break
                 buf.seek(0); buf.truncate(0)
                 for row in batch:
-                    values = [row[key] for key in columns]
+                    values = [run_id if key == 'run_id' else row[key] for key in columns]
                     writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@')) else v for v in values])
                 yield buf.getvalue()
     return StreamingResponse(generate(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote('筛选结果.csv')})

@@ -26,6 +26,7 @@ from typing import List
 import config
 from media_platform.douyin.media import extract_cover_url, extract_image_urls, extract_video_urls
 from var import source_keyword_var
+from tools import research_capture
 from tools.user_hash import anonymize_user_id, mask_nickname
 
 from ._store_impl import *
@@ -116,7 +117,8 @@ async def update_douyin_aweme(aweme_item: Dict):
         "source_keyword": source_keyword_var.get(),
     }
     utils.logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_id}, title:{save_content_item.get('title')}")
-    await DouyinStoreFactory.create_store().store_content(content_item=save_content_item)
+    if not research_capture.save('dy', save_content_item):
+        await DouyinStoreFactory.create_store().store_content(content_item=save_content_item)
 
 
 async def batch_update_dy_aweme_comments(aweme_id: str, comments: List[Dict]):
@@ -149,7 +151,8 @@ async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
     }
     utils.logger.info(f"[store.douyin.update_dy_aweme_comment] douyin aweme comment: {comment_id}, content: {save_comment_item.get('content')}")
 
-    await DouyinStoreFactory.create_store().store_comment(comment_item=save_comment_item)
+    if not research_capture.save('dy', save_comment_item, comment=True):
+        await DouyinStoreFactory.create_store().store_comment(comment_item=save_comment_item)
 
 
 async def save_creator(user_id: str, creator: Dict):

@@ -9,7 +9,6 @@
 3. 仓库 grep 断言 —— store/ 与 media_platform/ 不再把禁用字段作为存储 dict 的 key。
 """
 import re
-import subprocess
 import pathlib
 
 import pytest
@@ -215,24 +214,18 @@ def test_bilibili_video_dict_masks_user_info():
 
 def test_store_no_forbidden_dict_keys():
     # store/ 下不得把禁用字段作为存储 dict 的 key("field": value 形式)
-    out = subprocess.run(
-        ["grep", "-rnE", '"(' + "|".join(FORBIDDEN_KEYS) + r')"\s*:', str(ROOT / "store")],
-        capture_output=True, text=True,
-    )
+    pattern = re.compile('"(' + '|'.join(FORBIDDEN_KEYS) + r')"\s*:')
+    matches = [str(path) for path in (ROOT / 'store').rglob('*.py') if pattern.search(path.read_text(encoding='utf-8'))]
     # 允许的例外：Mongo store_creator 里的 query={"user_id": ...} 已全部改为 pass，应为空
-    assert out.stdout.strip() == "", f"store/ 仍写入禁用字段键:\n{out.stdout}"
+    assert not matches, f"store/ 仍写入禁用字段键: {matches}"
 
 
 def test_store_no_creator_orm_imports():
     # 已删除的 creator ORM 表(XhsCreator/DyCreator/...)不得再从 database.models 导入。
     # 注意:model/m_*.py 里的同名 pydantic 类是内存类型，允许保留。
-    out = subprocess.run(
-        ["grep", "-rnE",
-         r"from database\.models import.*(XhsCreator|DyCreator|WeiboCreator|TiebaCreator|ZhihuCreator|BilibiliUpInfo|BilibiliContactInfo)",
-         str(ROOT / "store")],
-        capture_output=True, text=True,
-    )
-    assert out.stdout.strip() == "", f"store/ 仍 import 已删除的 creator ORM 表:\n{out.stdout}"
+    pattern = re.compile(r'from database\.models import.*(XhsCreator|DyCreator|WeiboCreator|TiebaCreator|ZhihuCreator|BilibiliUpInfo|BilibiliContactInfo)')
+    matches = [str(path) for path in (ROOT / 'store').rglob('*.py') if pattern.search(path.read_text(encoding='utf-8'))]
+    assert not matches, f"store/ 仍 import 已删除的 creator ORM 表: {matches}"
 
 
 if __name__ == "__main__":

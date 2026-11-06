@@ -20,6 +20,7 @@ import asyncio
 import subprocess
 import signal
 import os
+import sys
 from typing import Optional, List
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,7 @@ class CrawlerManager:
         self._log_id = 0
         self._logs: List[LogEntry] = []
         self._read_task: Optional[asyncio.Task] = None
+        self.research_owner: Optional[str] = None
         # Project root directory
         self._project_root = Path(__file__).parent.parent.parent
         # Log queue - for pushing to WebSocket
@@ -91,9 +93,11 @@ class CrawlerManager:
             return "debug"
         return "info"
 
-    async def start(self, config: CrawlerStartRequest) -> bool:
+    async def start(self, config: CrawlerStartRequest, research_env=None) -> bool:
         """Start crawler process"""
         async with self._lock:
+            if self.research_owner and (research_env or {}).get('MC_RESEARCH_ID') != self.research_owner:
+                return False
             if self.process and self.process.poll() is None:
                 return False
 
@@ -114,6 +118,8 @@ class CrawlerManager:
 
             # Build command line arguments
             cmd = self._build_command(config)
+            if research_env:
+                cmd = [sys.executable, 'main.py', *cmd[4:]]
 
             # Log start information
             entry = self._create_log_entry(f"Starting crawler: {' '.join(cmd)}", "info")
@@ -129,7 +135,7 @@ class CrawlerManager:
                     encoding='utf-8',
                     bufsize=1,
                     cwd=str(self._project_root),
-                    env={**os.environ, "PYTHONUNBUFFERED": "1", **self._runtime_settings(config)}
+                    env={**os.environ, "PYTHONUNBUFFERED": "1", **self._runtime_settings(config), **(research_env or {})}
                 )
 
                 self.status = "running"
@@ -170,7 +176,11 @@ class CrawlerManager:
             await self._push_log(entry)
 
             try:
-                self.process.send_signal(signal.SIGTERM)
+                if os.name == 'nt' and self.research_owner:
+                    # Windows SIGTERM kills Python without closing its browser descendants.
+                    await asyncio.to_thread(subprocess.run, ['taskkill', '/PID', str(self.process.pid), '/T', '/F'], capture_output=True, timeout=10)
+                else:
+                    self.process.send_signal(signal.SIGTERM)
 
                 # Wait for graceful exit (up to 15 seconds)
                 for _ in range(30):

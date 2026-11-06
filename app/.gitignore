@@ -184,3 +184,5 @@ debug_tools
 
 database/*.db
 .omx/
+config/ai.local.json
+config/ai.local.json.tmp

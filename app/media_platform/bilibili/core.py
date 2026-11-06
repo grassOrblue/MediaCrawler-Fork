@@ -147,6 +147,9 @@ class BilibiliCrawler(AbstractCrawler):
             utils.logger.info("[BilibiliCrawler.start] Bilibili Crawler finished ...")
 
     async def search(self):
+        from tools import research_capture
+        if research_capture.active():
+            return await research_capture.search(self, 'bili')
         """
         search bilibili video
         """
@@ -198,6 +201,9 @@ class BilibiliCrawler(AbstractCrawler):
         search bilibili video with keywords in normal mode
         :return:
         """
+        from tools import research_capture
+        if research_capture.active():
+            return await research_capture.search(self, 'bili')
         utils.logger.info("[BilibiliCrawler.search_by_keywords] Begin search bilibli keywords")
         bili_limit_count = 20  # bilibili limit page fixed value
         if config.CRAWLER_MAX_NOTES_COUNT < bili_limit_count:
@@ -375,6 +381,9 @@ class BilibiliCrawler(AbstractCrawler):
 
             except DataFetchError as ex:
                 utils.logger.error(f"[BilibiliCrawler.get_comments] get video_id: {video_id} comment error: {ex}")
+                from tools import research_capture
+                if research_capture.active():
+                    raise
             except Exception as e:
                 utils.logger.error(f"[BilibiliCrawler.get_comments] may be been blocked, err:{e}")
                 # Propagate the exception to be caught by the main loop
@@ -448,6 +457,9 @@ class BilibiliCrawler(AbstractCrawler):
                 return result
             except DataFetchError as ex:
                 utils.logger.error(f"[BilibiliCrawler.get_video_info_task] Get video detail error: {ex}")
+                from tools import research_capture
+                if research_capture.active():
+                    raise
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[BilibiliCrawler.get_video_info_task] have not fund note detail video_id:{bvid}, err: {ex}")

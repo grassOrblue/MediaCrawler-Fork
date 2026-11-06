@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from cmd_arg import parse_cmd
 from api.schemas import CrawlerStartRequest, PlatformEnum, LoginTypeEnum, CrawlerTypeEnum
+from api.schemas.crawler import MAX_API_LIMIT_COUNT
 from api.services.crawler_manager import CrawlerManager
 from api.main import app
 
@@ -143,10 +144,10 @@ def test_api_start_crawler_without_limits():
     [
         ("max_notes_count", 0),
         ("max_notes_count", -1),
-        ("max_notes_count", 10001),
+        ("max_notes_count", MAX_API_LIMIT_COUNT + 1),
         ("max_comments_count", 0),
         ("max_comments_count", -1),
-        ("max_comments_count", 10001),
+        ("max_comments_count", MAX_API_LIMIT_COUNT + 1),
     ],
 )
 def test_api_rejects_invalid_limits(field_name, value):

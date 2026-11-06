@@ -101,6 +101,11 @@ async def main() -> None:
     global crawler
 
     args = await cmd_arg.parse_cmd()
+    from tools import research_capture
+    if research_capture.active():
+        config.ENABLE_GET_MEDIA = False
+        config.ENABLE_GET_SUB_COMMENTS = False
+        config.ENABLE_GET_WORDCLOUD = False
     if args.init_db:
         await db.init_db(args.init_db)
         print(f"Database {args.init_db} initialized successfully.")
@@ -111,7 +116,11 @@ async def main() -> None:
         await db.init_db(config.SAVE_DATA_OPTION)
 
     crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
-    await crawler.start()
+    try:
+        await crawler.start()
+    except Exception as exc:
+        research_capture.failed(config.PLATFORM, exc)
+        raise
 
     _flush_excel_if_needed()
 

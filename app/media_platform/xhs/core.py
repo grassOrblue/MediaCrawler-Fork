@@ -136,6 +136,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
     async def search(self) -> None:
         """Search for notes and retrieve their comment information."""
+        from tools import research_capture
+        if research_capture.active():
+            return await research_capture.search(self, 'xhs')
         utils.logger.info("[XiaoHongShuCrawler.search] Begin search Xiaohongshu keywords")
         limit = config.CRAWLER_MAX_NOTES_COUNT  # 0: stop on exhausted search results
         start_page = max(1, config.START_PAGE)
@@ -352,6 +355,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 raise
             except DataFetchError as ex:
                 utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] Get note detail error: {ex}")
+                from tools import research_capture
+                if research_capture.active():
+                    raise
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] have not fund note detail note_id:{note_id}, err: {ex}")

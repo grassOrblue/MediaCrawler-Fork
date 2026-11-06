@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
-import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ArrowUpRight, BookOpen, ChevronLeft, ChevronRight, Download, EyeOff, Image as ImageIcon, RefreshCw, Search, Star } from 'lucide-react'
 
 type Post = { platform:string; post_id:string; kind:string; title:string; excerpt:string; body?:string; author:string; published_at:number; likes:number; collects:number; comments:number; original_url:string; tag_text:string; cover:string|null; saved:number; hidden:number; user_tags:string; note:string }
 type Comment = { comment_id:string; body:string; author:string; published_at:number; likes:number }
 type Detail = Post & { body:string; keywords:string[]; media:{name:string;kind:string}[]; comment_items:Comment[]; indexed_comments:number; next_comment:number|null }
 type Status = { posts:number; comments:number; media:number; running:boolean; last_sync:number|null; errors:{file:string;message:string}[]; platforms:string[]; keywords:string[] }
-type Filters = { q:string; exclude:string; platform:string; keyword:string; kind:string; min_likes:string; min_collects:string; min_comments:string; since:string; until:string; images:boolean; saved:boolean; show_hidden:boolean; tag:string; sort:string }
-const defaults:Filters = {q:'',exclude:'',platform:'',keyword:'',kind:'',min_likes:'',min_collects:'',min_comments:'',since:'',until:'',images:false,saved:false,show_hidden:false,tag:'',sort:'recent'}
+type Batches = { items:{id:string;name:string;created_at:number;status:string}[];latest_id:string }
+type Filters = { q:string; exclude:string; platform:string; keyword:string; kind:string; min_likes:string; min_collects:string; min_comments:string; since:string; until:string; images:boolean; saved:boolean; show_hidden:boolean; tag:string; sort:string;run_id:string }
+const initialParams=new URLSearchParams(location.search)
+const defaults:Filters = {q:'',exclude:'',platform:'',keyword:'',kind:'',min_likes:'',min_collects:'',min_comments:'',since:'',until:'',images:false,saved:false,show_hidden:false,tag:'',sort:'recent',run_id:initialParams.get('run_id')||''}
 const names:Record<string,string> = {xhs:'小红书',bili:'B 站',dy:'抖音',ks:'快手',wb:'微博',tieba:'贴吧',zhihu:'知乎'}
 const fmt = (n:number) => new Intl.NumberFormat('zh-CN',{notation:n>=10000?'compact':'standard'}).format(n || 0)
 const date = (n:number) => n ? new Date(n).toLocaleDateString('zh-CN') : '时间未知'
@@ -29,13 +31,23 @@ export function LibraryPage() {
   const queryClient=useQueryClient()
   const [draft,setDraft]=useState<Filters>(defaults),[filters,setFilters]=useState<Filters>(defaults)
   const [cursors,setCursors]=useState(['']),[page,setPage]=useState(0),[total,setTotal]=useState<number|null>(null)
-  const [selected,setSelected]=useState<{platform:string;post_id:string}|null>(null)
+  const [selected,setSelected]=useState<{platform:string;post_id:string}|null>(()=>initialParams.get('platform')&&initialParams.get('post_id')?{platform:initialParams.get('platform')!,post_id:initialParams.get('post_id')!}:null)
   const [error,setError]=useState(''),[busy,setBusy]=useState('')
+  const [batchChoice,setBatchChoice]=useState<string|null>(()=>initialParams.has('run_id')?initialParams.get('run_id')||'':null)
+  const batches=useQuery({queryKey:['library-batches'],queryFn:()=>api<Batches>('/api/library/batches'),refetchInterval:3000})
+  const batchId=batchChoice??batches.data?.latest_id??''
+  const effectiveFilters={...filters,run_id:batchId}
+  const pageCursor=filters.run_id===batchId?cursors[page]:''
   const status=useQuery({queryKey:['library-status'],queryFn:()=>api<Status>('/api/library/status'),refetchInterval:3000})
-  const list=useQuery({queryKey:['library-posts',filters,cursors[page]],queryFn:()=>api<{items:Post[];total:number|null;next_cursor:string}>(`/api/library/posts?${params(filters)}&cursor=${encodeURIComponent(cursors[page])}`),placeholderData:keepPreviousData})
+  const list=useQuery({queryKey:['library-posts',effectiveFilters,pageCursor],queryFn:()=>api<{items:Post[];total:number|null;next_cursor:string}>(`/api/library/posts?${params(effectiveFilters)}&cursor=${encodeURIComponent(pageCursor)}`),enabled:batchChoice!==null||batches.isSuccess,placeholderData:(previous,query)=>(query?.queryKey[1] as Filters|undefined)?.run_id===batchId?previous:undefined})
+  useEffect(()=>{setFilters(old=>({...old,run_id:batchId}));setDraft(old=>({...old,run_id:batchId}));setCursors(['']);setPage(0);setTotal(null)},[batchId])
   useEffect(()=>{if(list.data?.total!=null)setTotal(list.data.total)},[list.data])
   useEffect(()=>{if(status.data?.last_sync)void queryClient.invalidateQueries({queryKey:['library-posts']})},[status.data?.last_sync,queryClient])
   function apply(next:Filters) { setFilters({...next});setCursors(['']);setPage(0);setTotal(null);setSelected(null) }
+  function selectBatch(value:string) {
+    setBatchChoice(value);setDraft(old=>({...old,run_id:value}));apply({...filters,run_id:value})
+    const url=new URL(location.href);url.searchParams.set('run_id',value);url.searchParams.delete('platform');url.searchParams.delete('post_id');history.replaceState(null,'',url)
+  }
   async function mark(post:Post, values:Record<string,unknown>) {
     setBusy(post.post_id);setError('')
     try { await api(path(post),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)}); await queryClient.invalidateQueries({queryKey:['library-posts']}); await queryClient.invalidateQueries({queryKey:['library-detail',post.platform,post.post_id]}) }
@@ -49,13 +61,14 @@ export function LibraryPage() {
   const crawlUrl=`${location.protocol}//${location.hostname}:${rootPort}`
   function field(key:keyof Filters,value:string|boolean) {setDraft(old=>({...old,[key]:value}))}
   return <div className="lib-page">
-    <header className="lib-header"><a className="lib-brand" href="/" onClick={e=>{e.preventDefault();setSelected(null)}}><BookOpen size={22}/><strong>数据资料库</strong><span>MediaCrawler</span></a><a className="lib-link" href={crawlUrl} target="_blank" rel="noreferrer">采集控制台 <ArrowUpRight size={15}/></a></header>
-    <div className="lib-intro"><div><span className="lib-eyebrow">YOUR LOCAL COLLECTION</span><h1>把采集结果，变成可用的资料。</h1><p>筛选、浏览图片，留下真正需要的内容。</p></div><div className="lib-top-actions"><button className="lib-button" onClick={()=>void sync()} disabled={status.data?.running}><RefreshCw size={16} className={status.data?.running?'animate-spin':''}/>{status.data?.running?'正在同步…':'同步新数据'}</button><a className="lib-button lib-primary" href={`/api/library/export?${params(filters)}`}><Download size={16}/>导出筛选结果</a></div></div>
-    <div className="lib-stats"><span><strong>{fmt(status.data?.posts||0)}</strong> 篇内容</span><span><strong>{fmt(status.data?.comments||0)}</strong> 条评论</span><span><strong>{fmt(status.data?.media||0)}</strong> 个本地媒体</span><span className="lib-sync-state">{status.data?.running?'正在整理新数据，已有内容可继续浏览':status.data?.last_sync?`最近同步 ${new Date(status.data.last_sync).toLocaleTimeString('zh-CN')}`:'正在准备资料库…'}</span></div>
-    {(error||status.error||list.error)&&<div role="alert" className="lib-alert">{error||(status.error as Error)?.message||(list.error as Error)?.message}</div>}
+    <header className="lib-header"><a className="lib-brand" href="/" onClick={e=>{e.preventDefault();setSelected(null)}}><BookOpen size={22}/><strong>数据资料库</strong><span>MediaCrawler</span></a><a className="lib-link" href={`${crawlUrl}/research`} target="_blank" rel="noreferrer">需求研究 / 批次报告 <ArrowUpRight size={15}/></a><a className="lib-link" href={crawlUrl} target="_blank" rel="noreferrer">采集控制台 <ArrowUpRight size={15}/></a></header>
+    <div className="lib-batch-bar"><label htmlFor="library-batch">采集批次<select id="library-batch" value={batchId} disabled={batches.isPending} onChange={e=>selectBatch(e.target.value)}><option value="">全部批次（含历史未分批）</option><option value="__legacy__">历史未分批内容</option>{batchId&&batchId!=='__legacy__'&&!batches.data?.items.some(b=>b.id===batchId)&&<option value={batchId}>指定批次：{batchId}</option>}{batches.data?.items.map((batch,index)=><option key={batch.id} value={batch.id}>{batch.id}{batch.name!==batch.id?` · ${batch.name}`:''}{index===0?'（最新）':''}</option>)}</select></label><span>{batches.isPending?'正在加载批次…':batchChoice===null&&batchId?'已默认选中最新采集批次':'切换批次后立即显示对应内容；导出也使用当前批次。'}</span></div>
+    <div className="lib-intro"><div><span className="lib-eyebrow">YOUR LOCAL COLLECTION</span><h1>把采集结果，变成可用的资料。</h1><p>筛选、浏览图片，留下真正需要的内容。</p></div><div className="lib-top-actions"><button className="lib-button" onClick={()=>void sync()} disabled={status.data?.running}><RefreshCw size={16} className={status.data?.running?'animate-spin':''}/>{status.data?.running?'正在同步…':'同步新数据'}</button><a className="lib-button lib-primary" href={`/api/library/export?${params(effectiveFilters)}`}><Download size={16}/>导出筛选结果</a></div></div>
+    <div className="lib-stats"><span>全库：<strong>{fmt(status.data?.posts||0)}</strong> 篇内容</span><span><strong>{fmt(status.data?.comments||0)}</strong> 条评论</span><span><strong>{fmt(status.data?.media||0)}</strong> 个本地媒体</span><span className="lib-sync-state">{status.data?.running?'正在整理新数据，已有内容可继续浏览':status.data?.last_sync?`最近同步 ${new Date(status.data.last_sync).toLocaleTimeString('zh-CN')}`:'正在准备资料库…'}</span></div>
+    {(error||status.error||list.error||batches.error)&&<div role="alert" className="lib-alert">{error||(status.error as Error)?.message||(list.error as Error)?.message||(batches.error as Error)?.message}</div>}
     {!!status.data?.errors.length&&<div className="lib-notice">{status.data.errors.length} 个来源暂未完成同步（可能仍在写入），会自动重试；已有数据可正常使用。</div>}
     {selected?<PostDetail identity={selected} onBack={()=>setSelected(null)} onMark={mark} busy={busy}/>:<div className="lib-workspace">
-      <aside className="lib-filters"><div className="lib-filter-title"><h2><Search size={17}/>筛选内容</h2><button onClick={()=>{setDraft(defaults);apply(defaults)}}>重置</button></div>
+      <aside className="lib-filters"><div className="lib-filter-title"><h2><Search size={17}/>筛选内容</h2><button onClick={()=>{const next={...defaults,run_id:batchId};setDraft(next);apply(next)}}>重置</button></div>
         <form onSubmit={e=>{e.preventDefault();apply(draft)}}>
           <label>包含关键词<input value={draft.q} onChange={e=>field('q',e.target.value)} placeholder="标题 / 正文 / 标签，空格表示同时满足"/></label>
           <label>排除关键词<input value={draft.exclude} onChange={e=>field('exclude',e.target.value)} placeholder="不想看到的内容，空格分隔"/></label>

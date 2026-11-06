@@ -26,6 +26,7 @@ from typing import List
 
 import config
 from var import source_keyword_var
+from tools import research_capture
 from tools.user_hash import anonymize_user_id, mask_nickname
 
 from ._store_impl import *
@@ -59,8 +60,8 @@ async def update_bilibili_video(video_item: Dict):
     save_content_item = {
         "video_id": video_id,
         "video_type": "video",
-        "title": video_item_view.get("title", "")[:500],
-        "desc": video_item_view.get("desc", "")[:500],
+        "title": video_item_view.get("title", "") if research_capture.active() else video_item_view.get("title", "")[:500],
+        "desc": video_item_view.get("desc", "") if research_capture.active() else video_item_view.get("desc", "")[:500],
         "create_time": video_item_view.get("pubdate"),
         "creator_hash": anonymize_user_id(video_user_info.get("mid")),  # 创作者匿名哈希(不存原始 mid)
         "nickname": mask_nickname(video_user_info.get("name")),  # 用户昵称(已脱敏)
@@ -78,7 +79,8 @@ async def update_bilibili_video(video_item: Dict):
         "source_keyword": source_keyword_var.get(),
     }
     utils.logger.info(f"[store.bilibili.update_bilibili_video] bilibili video id:{video_id}, title:{save_content_item.get('title')}")
-    await BiliStoreFactory.create_store().store_content(content_item=save_content_item)
+    if not research_capture.save('bili', save_content_item):
+        await BiliStoreFactory.create_store().store_content(content_item=save_content_item)
 
 
 async def update_up_info(video_item: Dict):
@@ -112,7 +114,8 @@ async def update_bilibili_video_comment(video_id: str, comment_item: Dict):
         "last_modify_ts": utils.get_current_timestamp(),
     }
     utils.logger.info(f"[store.bilibili.update_bilibili_video_comment] Bilibili video comment: {comment_id}, content: {save_comment_item.get('content')}")
-    await BiliStoreFactory.create_store().store_comment(comment_item=save_comment_item)
+    if not research_capture.save('bili', save_comment_item, comment=True):
+        await BiliStoreFactory.create_store().store_comment(comment_item=save_comment_item)
 
 
 async def batch_update_bilibili_creator_fans(creator_info: Dict, fans_list: List[Dict]):

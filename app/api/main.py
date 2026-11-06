@@ -27,10 +27,11 @@ import sys
 import subprocess
 from pathlib import Path
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from .routers.research import router as research_router, workflow
 
 from .routers import crawler_router, data_router, websocket_router
 
@@ -64,6 +65,36 @@ app.add_middleware(
 app.include_router(crawler_router, prefix="/api")
 app.include_router(data_router, prefix="/api")
 app.include_router(websocket_router, prefix="/api")
+app.include_router(research_router, prefix="/api")
+
+
+@app.on_event('startup')
+async def recover_research():
+    workflow().store.recover()
+
+
+@app.on_event('shutdown')
+async def stop_research():
+    current = workflow()
+    if current.task and not current.task.done():
+        from .services.crawler_manager import crawler_manager
+        if crawler_manager.research_owner:
+            await current.stop(crawler_manager.research_owner)
+    tasks = list(current.ai.tasks.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@app.exception_handler(ValueError)
+async def invalid_request(request: Request, exc: ValueError):
+    return JSONResponse(status_code=400, content={'detail': str(exc)})
+
+
+@app.get('/research')
+async def research_page():
+    return FileResponse(os.path.join(WEBUI_DIR, 'research.html'))
 
 
 @app.get("/")

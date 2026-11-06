@@ -40,6 +40,10 @@ async def start_crawler(request: CrawlerStartRequest):
 @router.post("/stop")
 async def stop_crawler():
     """Stop crawler task"""
+    if crawler_manager.research_owner:
+        from .research import workflow
+        await workflow().stop(crawler_manager.research_owner)
+        return {'status': 'ok', 'message': 'Research batch stopped'}
     success = await crawler_manager.stop()
     if not success:
         # Handle concurrent/duplicate requests: if process already exited/doesn't exist, return 400 instead of 500

@@ -194,14 +194,14 @@ class LibraryStore:
         if not isinstance(tags,str):
             tags = json.dumps(tags,ensure_ascii=False)
         title, body = str(row.get('title') or ''), str(row.get('desc') or row.get('content') or row.get('content_text') or '')
-        url = str(row.get('note_url') or row.get('video_url') or row.get('content_url') or '')
+        url = str(row.get('note_url') or row.get('aweme_url') or row.get('video_url') or row.get('content_url') or '')
         if not url.startswith(('https://','http://')):
             url = ''
-        values = (platform,pid,title,body,str(row.get('type') or row.get('content_type') or 'note'),str(row.get('nickname') or row.get('user_nickname') or ''),
+        values = (platform,pid,title,body,str(row.get('type') or row.get('video_type') or ('video' if platform=='dy' else row.get('content_type') or 'note')),str(row.get('nickname') or row.get('user_nickname') or ''),
                   timestamp(row.get('time') or row.get('create_time') or row.get('publish_time') or row.get('created_time')),
                   number(row.get('liked_count') or row.get('digg_count') or row.get('voteup_count')),
-                  number(row.get('collected_count') or row.get('collect_count')),
-                  number(row.get('comment_count') or row.get('comments_count') or row.get('total_replay_num')),
+                  number(row.get('collected_count') or row.get('collect_count') or row.get('video_favorite_count')),
+                  number(row.get('comment_count') or row.get('comments_count') or row.get('total_replay_num') or row.get('video_comment')),
                   url,tags,timestamp(row.get('last_modify_ts') or row.get('last_update_time')))
         db.execute('''INSERT INTO posts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(platform,post_id) DO UPDATE SET
             title=excluded.title,body=excluded.body,kind=excluded.kind,author=excluded.author,published_at=excluded.published_at,
@@ -329,6 +329,13 @@ class LibraryStore:
             self._stats_at = time.monotonic()
         return {**self.state,**self._stats_cache}
 
+    def batches(self):
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='research_runs'").fetchone():
+                return {'items': [], 'latest_id': ''}
+            items = [dict(row) for row in db.execute('SELECT id,name,created_at,status FROM research_runs ORDER BY created_at DESC,rowid DESC')]
+        return {'items': items, 'latest_id': items[0]['id'] if items else ''}
+
     def filters(self, f):
         where, args = ['1=1'], []
         for word in f.get('q','').strip().split():
@@ -349,6 +356,17 @@ class LibraryStore:
                 where.append(column+'=?'); args.append(f[key])
         if f.get('keyword'):
             where.append('EXISTS(SELECT 1 FROM keywords k WHERE k.platform=p.platform AND k.post_id=p.post_id AND k.keyword=?)'); args.append(f['keyword'])
+        if f.get('run_id'):
+            with self.connect() as db:
+                ready = db.execute("SELECT 1 FROM sqlite_master WHERE name='research_items'").fetchone()
+            if ready:
+                if f['run_id'] == '__legacy__':
+                    where.append("NOT EXISTS(SELECT 1 FROM research_items ri WHERE ri.platform=p.platform AND ri.post_id=p.post_id AND ri.kind='post' AND ri.is_new=1)")
+                else:
+                    where.append("EXISTS(SELECT 1 FROM research_items ri WHERE ri.run_id=? AND ri.platform=p.platform AND ri.post_id=p.post_id AND ri.kind='post')")
+                    args.append(f['run_id'])
+            else:
+                where.append('1=1' if f['run_id'] == '__legacy__' else '0=1')
         for key,column in [('min_likes','likes'),('min_collects','collects'),('min_comments','comments')]:
             if f.get(key) is not None:
                 where.append('p.'+column+'>=?'); args.append(max(0,int(f[key])))
