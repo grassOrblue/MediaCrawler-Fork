@@ -358,11 +358,20 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         posts_has_more = 1
         max_cursor = ""
         result = []
+        seen_cursors = set()
         while posts_has_more == 1:
+            from tools import research_capture
+            if research_capture.exhausted():
+                break
+            if research_capture.active() and max_cursor in seen_cursors:
+                break
+            seen_cursors.add(max_cursor)
             aweme_post_res = await self.get_user_aweme_posts(sec_user_id, max_cursor)
             posts_has_more = aweme_post_res.get("has_more", 0)
             max_cursor = aweme_post_res.get("max_cursor")
             aweme_list = aweme_post_res.get("aweme_list") if aweme_post_res.get("aweme_list") else []
+            if research_capture.active() and not aweme_list:
+                break
             utils.logger.info(f"[DouYinClient.get_all_user_aweme_posts] get sec_user_id:{sec_user_id} video len : {len(aweme_list)}")
             if callback:
                 await callback(aweme_list)

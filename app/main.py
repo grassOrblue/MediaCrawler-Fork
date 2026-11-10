@@ -103,8 +103,6 @@ async def main() -> None:
     args = await cmd_arg.parse_cmd()
     from tools import research_capture
     if research_capture.active():
-        config.ENABLE_GET_MEDIA = False
-        config.ENABLE_GET_SUB_COMMENTS = False
         config.ENABLE_GET_WORDCLOUD = False
     if args.init_db:
         await db.init_db(args.init_db)
@@ -112,14 +110,16 @@ async def main() -> None:
         return
 
     # 数据库保存模式下自动建表，避免首次运行时出现 no such table 错误
-    if config.SAVE_DATA_OPTION in ("sqlite", "mysql", "db", "postgres"):
+    if config.SAVE_DATA_OPTION in ("sqlite", "mysql", "db", "postgres") and not (research_capture.active() and config.SAVE_DATA_OPTION == "sqlite"):
         await db.init_db(config.SAVE_DATA_OPTION)
 
     crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
     try:
         await crawler.start()
     except Exception as exc:
-        research_capture.failed(config.PLATFORM, exc)
+        from tools.research_login import LoginSkipped
+        if not isinstance(exc, LoginSkipped):
+            research_capture.failed(config.PLATFORM, exc)
         raise
 
     _flush_excel_if_needed()
@@ -148,7 +148,8 @@ async def async_cleanup() -> None:
                 if "closed" not in error_msg and "disconnected" not in error_msg:
                     print(f"[Main] Error closing browser context: {e}")
 
-    if config.SAVE_DATA_OPTION in ("db", "sqlite"):
+    from tools import research_capture
+    if config.SAVE_DATA_OPTION in ("db", "sqlite") and not (research_capture.active() and config.SAVE_DATA_OPTION == "sqlite"):
         await db.close()
 
 if __name__ == "__main__":

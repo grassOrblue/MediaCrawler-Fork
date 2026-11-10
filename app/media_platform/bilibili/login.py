@@ -25,6 +25,7 @@
 
 import asyncio
 import functools
+import os
 import sys
 from typing import Optional
 
@@ -36,6 +37,7 @@ from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
 import config
 from base.base_crawler import AbstractLogin
 from tools import utils
+from tools.research_login import research_qr
 
 # B 站首页 header 目前新旧两套实现并行灰度，未登录时的登录入口选择器不同：
 # - 新版 header：.header-avatar-unlogin-entry
@@ -76,6 +78,7 @@ class BilibiliLogin(AbstractLogin):
         # 进入登录流程前浏览器里已有的 SESSDATA，用于区分"cookie 存在"与"cookie 有效"
         self._sessdata_before_login: str = ""
 
+    @research_qr
     async def begin(self):
         """Start login bilibili"""
         utils.logger.info("[BilibiliLogin.begin] Begin login Bilibili ...")
@@ -144,9 +147,12 @@ class BilibiliLogin(AbstractLogin):
 
         # show login qrcode
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
+        if os.environ.get('MC_RESEARCH_LOGIN'):
+            partial_show_qrcode()
+        else:
+            asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
 
-        utils.logger.info(f"[BilibiliLogin.login_by_qrcode] Waiting for scan code login, remaining time is 20s")
+        utils.logger.info(f"[BilibiliLogin.login_by_qrcode] Waiting for scan code login, waiting for confirmation; research page supports refresh or skip")
         try:
             await self.check_login_state()
         except RetryError:

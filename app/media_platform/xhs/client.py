@@ -645,6 +645,9 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         notes_has_more = True
         notes_cursor = ""
         while notes_has_more and len(result) < config.CRAWLER_MAX_NOTES_COUNT:
+            from tools import research_capture
+            if research_capture.exhausted():
+                break
             notes_res = await self.get_notes_by_creator(
                 user_id, notes_cursor, xsec_token=xsec_token, xsec_source=xsec_source
             )

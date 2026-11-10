@@ -240,6 +240,7 @@ def test_three_platforms_early_skip_and_shared_limit(store, monkeypatch, platfor
     monkeypatch.setenv('MC_RESEARCH_ID', rid)
     monkeypatch.setattr(capture, 'context', lambda: (store, rid))
     monkeypatch.setattr(config, 'CRAWLER_MAX_SLEEP_SEC', 0)
+    monkeypatch.setattr(config, 'SAVE_DATA_OPTION', 'sqlite')
     async def search(**kwargs):
         if platform == 'xhs':
             return {'items': [{'id': p} for p in ['old', 'new', 'too-many']], 'has_more': False}
@@ -256,7 +257,7 @@ def test_three_platforms_early_skip_and_shared_limit(store, monkeypatch, platfor
     crawler = SimpleNamespace(xhs_client=SimpleNamespace(get_note_by_keyword=search),
         dy_client=SimpleNamespace(search_info_by_keyword=search), bili_client=SimpleNamespace(search_video_by_keyword=search),
         get_note_detail_async_task=AsyncMock(side_effect=detail), get_video_info_task=AsyncMock(side_effect=detail),
-        batch_get_note_comments=comments, batch_get_video_comments=comments)
+        batch_get_note_comments=comments, batch_get_video_comments=comments, download_media=AsyncMock())
     asyncio.run(capture.search(crawler, platform))
     result = store.run(rid)
     assert result['counts']['checked'] == 2
@@ -432,3 +433,350 @@ def test_library_batch_options_before_research_upgrade(tmp_path):
         library.upsert(db, 'xhs', {'note_id': 'old', 'title': '旧数据'})
     assert library.batches() == {'items': [], 'latest_id': ''}
     assert library.list_posts({'run_id': '__legacy__'})['total'] == 1
+
+
+def test_output_truncation_retries_only_smaller_unfinished_chunk(store, tmp_path):
+    rid = batch(store)
+    for i in range(8):
+        post(store, rid, str(i), '底座太轻 ' + str(i))
+    store.set_run(rid, 'completed')
+    engine = ai(store, tmp_path)
+    job = engine.estimate_analysis(rid)
+    assert len(job['payload']['chunks']) == 2
+    calls = []
+    async def truncating(cfg, prompt):
+        calls.append(prompt)
+        if len(calls) == 2:
+            return {'_response_error': '达到输出上限', '_finish_reason': 'length'}, {'prompt_tokens': 10, 'completion_tokens': 1024, 'total_tokens': 1034}
+        return await fake_model(cfg, prompt)
+    engine.request = truncating
+    failed = asyncio.run(finish(engine, job))
+    assert failed['status'] == 'failed'
+    assert failed['state']['chunk_index'] == 1
+    assert len(failed['state']['candidates']) == 4
+    assert len(calls) == 2
+    retry = engine.reestimate(failed['id'])
+    assert retry['status'] == 'estimated'
+    assert len(calls) == 2  # estimating never performs a retry
+    assert len(retry['payload']['chunks']) == 3
+    assert retry['payload']['chunks'][0] == job['payload']['chunks'][0]
+    assert [len(c) for c in retry['payload']['chunks']] == [4, 2, 2]
+    assert retry['state']['chunk_index'] == 1
+    assert len(store.job(failed['id'])['payload']['chunks']) == 2
+    completed_ids = {s['id'] for s in job['payload']['chunks'][0]}
+    async def continuing(cfg, prompt):
+        if EXTRACT in prompt[0]['content']:
+            assert not completed_ids.intersection(s['id'] for s in json.loads(prompt[1]['content'])['materials'])
+        return await fake_model(cfg, prompt)
+    engine.request = continuing
+    result = asyncio.run(finish(engine, retry))
+    assert result['status'] == 'completed', result['error']
+    assert result['result']['demands'][0]['mentions'] == 8
+
+
+def test_split_single_segment_preserves_sources_and_short_chunk_quote_check(store, tmp_path):
+    rid = batch(store)
+    post(store, rid, '1', '甲' * 150 + '乙' * 150, title='')
+    store.set_run(rid, 'completed')
+    engine = ai(store, tmp_path)
+    job = engine.estimate_analysis(rid)
+    store.update_job(job['id'], status='failed', error='length', state={'stage': 'extract', 'finish_reason': 'length'})
+    retry = engine.reestimate(job['id'])
+    parts = retry['payload']['chunks']
+    assert len(parts) == 2
+    assert ''.join(c[0]['text'] for c in parts) == '甲' * 150 + '乙' * 150
+    assert all(next(s for s in retry['payload']['segments'] if s['id'] == c[0]['id'])['sources'] == ['e1'] for c in parts)
+    bad = {'items': [{'name': '错误证据', 'problem': '', 'scene': '', 'explicit': '', 'suggestion': '', 'evidence': [{'id': parts[0][0]['id'], 'quote': '乙'}]}]}
+    with pytest.raises(ValueError, match='非原文片段'):
+        engine.extracted(bad, parts[0], retry['payload'])
+
+
+def test_compact_merge_preserves_fields_and_validates_members(store, tmp_path):
+    engine = ai(store, tmp_path)
+    cfg = engine.configured()
+    job = store.create_job('analysis', {}, fingerprint(cfg), {'limit_tokens': 100000})
+    groups = [{'name': '支架不稳', 'problem': '容易倒', 'scene': '桌面', 'explicit': '', 'suggestion': '加重', 'evidence': [{'id': '1'}]},
+              {'name': '支架太轻', 'problem': '底座太轻', 'scene': '桌面', 'explicit': '增加配重', 'suggestion': '', 'evidence': [{'id': '2'}]}]
+    engine.request = AsyncMock(return_value=({'groups': [{'members': ['0', '1']}]}, {}))
+    merged = asyncio.run(engine.merge(job, cfg, {}, groups))
+    assert len(merged[0]['evidence']) == 2
+    assert merged[0]['explicit'] == '增加配重'
+    assert '容易倒' in merged[0]['problem'] and '底座太轻' in merged[0]['problem']
+    engine.request = AsyncMock(return_value=({'groups': [{'members': ['0', '0']}]}, {}))
+    state = {}
+    restored = asyncio.run(engine.merge(job, cfg, state, groups))
+    assert len(restored) == 2
+    assert {e['id'] for g in restored for e in g['evidence']} == {'1', '2'}
+    assert state['last_merge_check']['within_group_duplicates'] == 1
+    assert state['last_merge_check']['missing_candidates'] == 1
+    assert state['grouping_warnings']
+
+
+@pytest.mark.parametrize('reason,expected', [('length', '输出上限 1024'), ('content_filter', '审核拦截'), ('aborted', '中断')])
+def test_finish_reason_is_specific_and_usage_kept(store, tmp_path, monkeypatch, reason, expected):
+    engine = ai(store, tmp_path)
+    real_client = httpx.AsyncClient
+    def handler(request):
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'partial'}, 'finish_reason': reason}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 1024, 'total_tokens': 1034}})
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: real_client(**kwargs, transport=httpx.MockTransport(handler)))
+    result = asyncio.run(finish(engine, engine.estimate_keywords('支架吐槽', ['xhs'])))
+    assert result['status'] == 'failed'
+    assert expected in result['error']
+    assert result['state']['finish_reason'] == reason
+    assert result['state']['usage']['total_tokens'] == 1034
+    assert result['state']['calls'] == 1
+
+
+@pytest.mark.parametrize('response,expected_groups,conflicts,missing,invalid', [
+    ({'groups': [{'members': [0, 1]}, {'members': [2, 3]}]}, [{0, 1}, {2, 3}], 0, 0, 0),
+    ({'groups': [{'members': ['0', 0, '1']}, {'members': ['2', '3']}]}, [{0, 1}, {2, 3}], 0, 0, 0),
+    ({'groups': [{'members': [0, 1]}, {'members': [1, 2]}, {'members': [3]}]}, [{0}, {2}, {3}, {1}], 1, 0, 0),
+    ({'groups': [{'members': ['0', '1', '999', True, 1.0, None]}, {'members': ['3']}]}, [{0, 1}, {3}, {2}], 0, 1, 4),
+    ({'groups': []}, [{0}, {1}, {2}, {3}], 0, 4, 0),
+    ({'groups': [None, {'members': '0'}]}, [{0}, {1}, {2}, {3}], 0, 4, 2),
+])
+def test_group_membership_repairs_are_complete_and_conservative(store, tmp_path, response, expected_groups, conflicts, missing, invalid):
+    engine = ai(store, tmp_path)
+    cfg = engine.configured()
+    job = store.create_job('analysis', {}, fingerprint(cfg), {'limit_tokens': 100000})
+    candidates = [{'name': f'物品{i}的问题', 'problem': str(i), 'scene': '', 'explicit': '', 'suggestion': '',
+                   'evidence': [{'id': str(i)}], '_lineage': [str(i)]} for i in range(4)]
+    engine.request = AsyncMock(return_value=(response, {}))
+    state = {}
+    merged = asyncio.run(engine.merge(job, cfg, state, candidates))
+    assert [{int(e['id']) for e in g['evidence']} for g in merged] == expected_groups
+    assert sum(len(g['evidence']) for g in merged) == 4
+    assert state['last_merge_check']['cross_group_conflicts'] == conflicts
+    assert state['last_merge_check']['missing_candidates'] == missing
+    assert state['last_merge_check']['invalid_entries'] == invalid
+    if conflicts or missing or invalid:
+        assert state['grouping_warnings']
+    assert sorted(origin for g in merged for origin in g['_lineage']) == ['0', '1', '2', '3']
+
+
+def test_retry_failed_global_merge_retains_all_extracted_and_local_results(store, tmp_path, monkeypatch):
+    from api.routers import research as routes
+    from fastapi import FastAPI
+    engine = ai(store, tmp_path)
+    rid = batch(store)
+    for i in range(4):
+        post(store, rid, str(i), '底座太轻 ' + str(i))
+    store.set_run(rid, 'completed')
+    job = engine.estimate_analysis(rid)
+    payload = job['payload']
+    candidates = []
+    for chunk in payload['chunks']:
+        raw = asyncio.run(fake_model(engine.configured(), [{'content': EXTRACT}, {'content': json.dumps({'materials': chunk})}]))[0]
+        candidates.extend(engine.extracted(raw, chunk, payload))
+    state = {'chunk_index': len(payload['chunks']), 'merge_index': 4, 'stage': 'merge', 'merge_size': 4,
+             'candidates': candidates, 'batch_groups': candidates}
+    store.update_job(job['id'], status='failed', error='需求归类遗漏、重复或虚构了候选编号', state=state)
+    called_stages = []
+    async def response(cfg, prompt):
+        assert EXTRACT not in prompt[0]['content']
+        called_stages.append('merge' if MERGE in prompt[0]['content'] else 'summary')
+        if MERGE in prompt[0]['content']:
+            return {'groups': [{'members': [0, 1]}, {'members': [1, 2]}]}, {}
+        return {'summary': '测试摘要'}, {}
+    engine.request = response
+    retry = engine.reestimate(job['id'])
+    assert not called_stages
+    assert retry['state']['candidates'] == candidates
+    assert retry['state']['batch_groups'] == candidates
+    result = asyncio.run(finish(engine, retry))
+    assert result['status'] == 'completed', result['error']
+    assert called_stages == ['merge', 'summary']
+    assert result['result']['warnings']
+    assert {e['id'] for demand in result['result']['demands'] for e in demand['evidence']} == {d['id'] for d in payload['documents']}
+    worker = SimpleNamespace(store=store)
+    monkeypatch.setattr(routes, 'workflow', lambda: worker)
+    app = FastAPI()
+    app.include_router(routes.router, prefix='/api')
+    async def export():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            exported = await client.get('/api/research/jobs/' + result['id'] + '/export')
+            assert exported.status_code == 200
+            assert '归类说明' in exported.text and '冲突' in exported.text
+    asyncio.run(export())
+
+
+def test_unified_manual_modes_global_settings_and_cookie_privacy(store, tmp_path, monkeypatch):
+    from api.routers import research as routes
+    monkeypatch.setattr(routes, 'CAPTURE_FILE', tmp_path / 'capture.json')
+    manager = routes.crawler_manager
+    monkeypatch.setattr(manager, 'research_owner', None)
+    monkeypatch.setattr(manager, 'process', None)
+    preferences = routes.CapturePreferences(login_type='cookie', cookies={'xhs': 'test-cookie-secret'}, max_posts=77,
+                                           enable_media=True, enable_sub_comments=True, save_option='jsonl')
+    public = routes.save_capture_settings(preferences)
+    assert public['has_cookies']['xhs']
+    assert 'test-cookie-secret' not in json.dumps(public)
+    routes.save_capture_settings(routes.CapturePreferences(login_type='cookie', max_posts=77, enable_media=True,
+                                                          enable_sub_comments=True, save_option='jsonl'))
+    assert routes.capture_preferences().cookies['xhs'] == 'test-cookie-secret'
+    worker = Workflow(store)
+    monkeypatch.setattr(store.library, 'sync', lambda: None)
+    captured = []
+    async def start(request, env):
+        captured.append(request)
+        manager.process = SimpleNamespace(poll=lambda: 0)
+        manager.status = 'idle'
+        manager._read_task = asyncio.create_task(asyncio.sleep(0))
+        return True
+    monkeypatch.setattr(manager, 'start', start)
+    async def check():
+        for mode, targets, expected in [('search', [], 'search'), ('auto', ['https://www.xiaohongshu.com/explore/abcdef'], 'detail'),
+                                        ('auto', ['https://www.xiaohongshu.com/user/profile/abcdef'], 'creator')]:
+            body = RunRequest(platforms=['xhs'], crawler_type=mode, keywords={'xhs': ['物品 吐槽']}, targets={'xhs': targets})
+            run = await worker.launch(body)
+            await worker.task
+            request = captured[-1]
+            assert request.crawler_type.value == expected
+            assert request.cookies == 'test-cookie-secret'
+            assert request.max_notes_count == 77 and request.enable_media and request.enable_sub_comments
+            assert request.save_option.value == 'jsonl'
+            assert 'test-cookie-secret' not in json.dumps(store.run(run['id']), ensure_ascii=False)
+        parsed = store.create_job('keywords', {'description': '采集这位创作者', 'platforms': ['xhs']}, 'test', {})
+        store.update_job(parsed['id'], status='completed', result={'questions': [], 'crawl_plan': {'xhs': {'crawler_type': 'creator', 'targets': ['creator123']}}})
+        body = RunRequest(description='采集这位创作者', platforms=['xhs'], keyword_job_id=parsed['id'], targets={'xhs': ['creator123']})
+        await worker.launch(body)
+        await worker.task
+        assert captured[-1].crawler_type.value == 'creator'
+        assert captured[-1].creator_ids == 'creator123'
+        with pytest.raises(ValueError, match='不匹配'):
+            RunRequest(platforms=['xhs'], targets={'xhs': ['https://evil.invalid/video/1']})
+    asyncio.run(check())
+
+
+def test_ai_crawl_plan_allows_direct_targets_without_keywords():
+    result = {'understanding': '采集指定帖子', 'product': '根据目标内容发现', 'audience': '', 'questions': [],
+              'keywords': {'xhs': []}, 'crawl_plan': {'xhs': {'crawler_type': 'detail', 'targets': ['https://www.xiaohongshu.com/explore/abc']}}}
+    assert ResearchAI.keyword_result(result, ['xhs'])['crawl_plan']['xhs']['crawler_type'] == 'detail'
+    with pytest.raises(ValueError):
+        ResearchAI.keyword_result({**result, 'crawl_plan': {'xhs': {'crawler_type': 'invalid', 'targets': []}}}, ['xhs'])
+
+
+def test_direct_capture_skips_old_detail_and_comments(store, monkeypatch):
+    import config
+    from tools import research_capture as capture
+    from media_platform.xhs.core import XiaoHongShuCrawler
+    rid = batch(store)
+    with store.connect() as db:
+        store.library.upsert(db, 'xhs', {'note_id': 'old', 'title': '旧帖子'})
+    monkeypatch.setenv('MC_RESEARCH_ID', rid)
+    monkeypatch.setattr(capture, 'context', lambda: (store, rid))
+    monkeypatch.setattr(config, 'CRAWLER_TYPE', 'detail')
+    monkeypatch.setattr(config, 'PLATFORM', 'xhs')
+    monkeypatch.setattr(config, 'CRAWLER_MAX_SLEEP_SEC', 0)
+    monkeypatch.setattr(config, 'ENABLE_GET_COMMENTS', True)
+    crawler = XiaoHongShuCrawler.__new__(XiaoHongShuCrawler)
+    crawler.xhs_client = SimpleNamespace(get_note_by_id=AsyncMock(return_value={'note_id': 'new'}))
+    crawler.get_comments = AsyncMock()
+    async def check():
+        assert await crawler.get_note_detail_async_task('old', 'pc_search', 'old-token', asyncio.Semaphore(1)) is None
+        crawler.xhs_client.get_note_by_id.assert_not_awaited()
+        assert (await crawler.get_note_detail_async_task('new', 'pc_search', 'new-token', asyncio.Semaphore(1)))['note_id'] == 'new'
+        store.save_item(rid, 'xhs', {'note_id': 'new', 'title': '新帖子'})
+        await crawler.batch_get_note_comments(['old', 'new'], ['old-token', 'new-token'])
+        assert crawler.get_comments.await_count == 1
+        assert crawler.get_comments.await_args.kwargs['note_id'] == 'new'
+        assert crawler.get_comments.await_args.kwargs['xsec_token'] == 'new-token'
+    asyncio.run(check())
+
+
+def test_old_console_urls_redirect_and_source_is_retained():
+    from api.main import app
+    from pathlib import Path
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            for path in ('/', '/index.html', '/static/index.html'):
+                response = await client.get(path)
+                assert response.status_code == 307
+                assert response.headers['location'] == '/research'
+    asyncio.run(check())
+    assert (Path(__file__).resolve().parents[1] / 'webui/src/App.tsx').exists()
+
+
+def test_research_native_file_output_keeps_batch_id(store, tmp_path, monkeypatch):
+    import config
+    from tools import research_capture as capture
+    from tools.async_file_writer import AsyncFileWriter
+    rid = batch(store)
+    monkeypatch.setenv('MC_RESEARCH_ID', rid)
+    monkeypatch.setattr(capture, 'context', lambda: (store, rid))
+    monkeypatch.setattr(config, 'SAVE_DATA_OPTION', 'jsonl')
+    monkeypatch.setattr(config, 'SAVE_DATA_PATH', str(tmp_path / 'output'))
+    assert store.candidate(rid, 'xhs', 'file-post', '词', 50)
+    row = {'note_id': 'file-post', 'title': '原生文件输出'}
+    assert capture.save('xhs', row) is False  # continue through the existing file writer
+    assert row['run_id'] == rid
+    writer = AsyncFileWriter('xhs', 'search')
+    asyncio.run(writer.write_to_jsonl(row, 'contents'))
+    paths = list((tmp_path / 'output').rglob('*.jsonl'))
+    assert len(paths) == 1 and rid in paths[0].name
+    assert json.loads(paths[0].read_text(encoding='utf-8'))['run_id'] == rid
+    assert capture.save('xhs', row) is True  # duplicates do not reach the file writer
+
+
+def test_bilibili_direct_bv_uses_canonical_id_for_dedup(store, monkeypatch):
+    import config
+    from tools import research_capture as capture
+    from media_platform.bilibili.core import BilibiliCrawler
+    rid = batch(store, ['bili'])
+    with store.connect() as db:
+        store.library.upsert(db, 'bili', {'video_id': '123', 'title': '旧视频'})
+    monkeypatch.setenv('MC_RESEARCH_ID', rid)
+    monkeypatch.setattr(capture, 'context', lambda: (store, rid))
+    monkeypatch.setattr(config, 'CRAWLER_TYPE', 'detail')
+    monkeypatch.setattr(config, 'PLATFORM', 'bili')
+    monkeypatch.setattr(config, 'CRAWLER_MAX_SLEEP_SEC', 0)
+    crawler = BilibiliCrawler.__new__(BilibiliCrawler)
+    crawler.bili_client = SimpleNamespace(get_video_info=AsyncMock(side_effect=[{'View': {'aid': 123}}, {'View': {'aid': 124}}]))
+    async def check():
+        assert await crawler.get_video_info_task(0, 'BVold', asyncio.Semaphore(1)) is None
+        assert (await crawler.get_video_info_task(0, 'BVnew', asyncio.Semaphore(1)))['View']['aid'] == 124
+    asyncio.run(check())
+    counts = store.run(rid)['counts']
+    assert counts['checked'] == 2 and counts['old_posts'] == 1
+
+
+def test_process_start_log_redacts_cookie(monkeypatch):
+    from api.services.crawler_manager import CrawlerManager
+    import importlib
+    module = importlib.import_module('api.services.crawler_manager')
+    manager = CrawlerManager()
+    manager._read_output = AsyncMock()
+    received = []
+    def popen(cmd, **kwargs):
+        received.extend(cmd)
+        return SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(module.subprocess, 'Popen', popen)
+    from api.schemas import CrawlerStartRequest
+    async def check():
+        assert await manager.start(CrawlerStartRequest(platform='xhs', keywords='--cookies', cookies='cookie-must-stay-secret'))
+        await manager._read_task
+    asyncio.run(check())
+    assert 'cookie-must-stay-secret' in received
+    assert 'cookie-must-stay-secret' not in '\n'.join(entry.message for entry in manager.logs)
+
+
+def test_creator_pagination_stops_repeated_responses(monkeypatch):
+    import config
+    from tools import research_capture as capture
+    from media_platform.douyin.client import DouYinClient
+    from media_platform.bilibili.core import BilibiliCrawler
+    monkeypatch.setattr(capture, 'active', lambda: True)
+    monkeypatch.setattr(capture, 'exhausted', lambda: False)
+    monkeypatch.setattr(config, 'CRAWLER_MAX_SLEEP_SEC', 0)
+    dy = DouYinClient.__new__(DouYinClient)
+    dy.get_user_aweme_posts = AsyncMock(return_value={'has_more': 1, 'max_cursor': 'same', 'aweme_list': [{'aweme_id': '1'}]})
+    bili = BilibiliCrawler.__new__(BilibiliCrawler)
+    bili.bili_client = SimpleNamespace(get_creator_videos=AsyncMock(return_value={'list': {'vlist': [{'bvid': 'BVsame'}]}, 'page': {'count': 100000}}))
+    bili.get_specified_videos = AsyncMock()
+    async def check():
+        await dy.get_all_user_aweme_posts('creator', AsyncMock())
+        await bili.get_creator_videos(1)
+    asyncio.run(check())
+    assert dy.get_user_aweme_posts.await_count == 2
+    assert bili.bili_client.get_creator_videos.await_count == 2
+    assert bili.get_specified_videos.await_count == 1

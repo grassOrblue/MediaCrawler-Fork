@@ -216,6 +216,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """Get creator's notes and retrieve their comment information."""
         utils.logger.info("[XiaoHongShuCrawler.get_creators_and_notes] Begin get Xiaohongshu creators")
         for creator_url in config.XHS_CREATOR_ID_LIST:
+            from tools import research_capture
+            if research_capture.exhausted():
+                break
             try:
                 # Parse creator URL to get user_id and security tokens
                 creator_info: CreatorUrlInfo = parse_creator_info_from_url(creator_url)
@@ -324,6 +327,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
         note_detail = None
         utils.logger.info(f"[get_note_detail_async_task] Begin get note detail, note_id: {note_id}")
         async with semaphore:
+            from tools import research_capture
+            if not research_capture.detail_allowed('xhs', note_id):
+                return None
             try:
                 try:
                     note_detail = await self.xhs_client.get_note_by_id(note_id, xsec_source, xsec_token)
@@ -365,7 +371,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
     async def batch_get_note_comments(self, note_list: List[str], xsec_tokens: List[str]):
         """Batch get note comments"""
+        from tools import research_capture
+        allowed = research_capture.new_ids('xhs', note_list)
+        pairs = [(pid, token) for pid, token in zip(note_list, xsec_tokens) if pid in allowed]
+        note_list, xsec_tokens = [p[0] for p in pairs], [p[1] for p in pairs]
         if not config.ENABLE_GET_COMMENTS:
+            research_capture.complete('xhs', note_list)
             utils.logger.info(f"[XiaoHongShuCrawler.batch_get_note_comments] Crawling comment mode is not enabled")
             return
 
@@ -393,6 +404,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 callback=xhs_store.batch_update_xhs_note_comments,
                 max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
             )
+            from tools import research_capture
+            research_capture.complete('xhs', [note_id])
 
             # Sleep after fetching comments
             await asyncio.sleep(crawl_interval)

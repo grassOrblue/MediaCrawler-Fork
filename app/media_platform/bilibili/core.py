@@ -133,6 +133,9 @@ class BilibiliCrawler(AbstractCrawler):
             elif config.CRAWLER_TYPE == "creator":
                 if config.CREATOR_MODE:
                     for creator_url in config.BILI_CREATOR_ID_LIST:
+                        from tools import research_capture
+                        if research_capture.exhausted():
+                            break
                         try:
                             creator_info = parse_creator_info_from_url(creator_url)
                             utils.logger.info(f"[BilibiliCrawler.start] Parsed creator ID: {creator_info.creator_id} from {creator_url}")
@@ -347,7 +350,10 @@ class BilibiliCrawler(AbstractCrawler):
         :param video_id_list:
         :return:
         """
+        from tools import research_capture
+        video_id_list = research_capture.new_ids('bili', video_id_list)
         if not config.ENABLE_GET_COMMENTS:
+            research_capture.complete('bili', video_id_list)
             utils.logger.info(f"[BilibiliCrawler.batch_get_note_comments] Crawling comment mode is not enabled")
             return
 
@@ -378,6 +384,8 @@ class BilibiliCrawler(AbstractCrawler):
                     callback=bilibili_store.batch_update_bilibili_video_comments,
                     max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                 )
+                from tools import research_capture
+                research_capture.complete('bili', [video_id])
 
             except DataFetchError as ex:
                 utils.logger.error(f"[BilibiliCrawler.get_comments] get video_id: {video_id} comment error: {ex}")
@@ -396,9 +404,17 @@ class BilibiliCrawler(AbstractCrawler):
         """
         ps = 30
         pn = 1
+        seen_pages = set()
         while True:
+            from tools import research_capture
+            if research_capture.exhausted():
+                break
             result = await self.bili_client.get_creator_videos(creator_id, pn, ps)
             video_bvids_list = [video["bvid"] for video in result["list"]["vlist"]]
+            page_ids = tuple(video_bvids_list)
+            if research_capture.active() and (not page_ids or page_ids in seen_pages):
+                break
+            seen_pages.add(page_ids)
             await self.get_specified_videos(video_bvids_list)
             if int(result["page"]["count"]) <= pn * ps:
                 break
@@ -447,8 +463,16 @@ class BilibiliCrawler(AbstractCrawler):
         :return:
         """
         async with semaphore:
+            from tools import research_capture
+            if research_capture.active() and config.CRAWLER_TYPE != 'search' and research_capture.exhausted():
+                return None
+            if aid and not research_capture.detail_allowed('bili', aid):
+                return None
             try:
                 result = await self.bili_client.get_video_info(aid=aid, bvid=bvid)
+                # BV links need a lookup to obtain the canonical aid used by the library.
+                if not aid and not research_capture.detail_allowed('bili', (result.get('View') or {}).get('aid')):
+                    return None
 
                 # Sleep after fetching video details
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)

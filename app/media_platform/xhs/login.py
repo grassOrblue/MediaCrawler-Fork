@@ -20,6 +20,7 @@
 
 import asyncio
 import functools
+import os
 import sys
 from typing import Optional
 
@@ -31,6 +32,7 @@ import config
 from base.base_crawler import AbstractLogin
 from cache.cache_factory import CacheFactory
 from tools import utils
+from tools.research_login import research_qr
 
 
 class XiaoHongShuLogin(AbstractLogin):
@@ -84,6 +86,7 @@ class XiaoHongShuLogin(AbstractLogin):
 
         return False
 
+    @research_qr
     async def begin(self):
         """Start login xiaohongshu"""
         utils.logger.info("[XiaoHongShuLogin.begin] Begin login xiaohongshu ...")
@@ -197,9 +200,12 @@ class XiaoHongShuLogin(AbstractLogin):
         # we need to use partial function to call show_qrcode function and run in executor
         # then current asyncio event loop will not be blocked
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
+        if os.environ.get('MC_RESEARCH_LOGIN'):
+            partial_show_qrcode()
+        else:
+            asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
 
-        utils.logger.info(f"[XiaoHongShuLogin.login_by_qrcode] waiting for scan code login, remaining time is 120s")
+        utils.logger.info(f"[XiaoHongShuLogin.login_by_qrcode] waiting for scan code login, waiting for confirmation; research page supports refresh or skip")
         try:
             await self.check_login_state(no_logged_in_session)
         except RetryError:

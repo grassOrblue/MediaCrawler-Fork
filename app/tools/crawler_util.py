@@ -49,7 +49,7 @@ async def find_login_qrcode(page: Page, selector: str) -> str:
         login_qrcode_img = str(await elements.get_property("src"))  # type: ignore
         if "http://" in login_qrcode_img or "https://" in login_qrcode_img:
             async with make_async_client(follow_redirects=True) as client:
-                utils.logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
+                utils.logger.info('[find_login_qrcode] Fetching login QR image')
                 resp = await client.get(login_qrcode_img, headers={"User-Agent": get_user_agent()})
                 if resp.status_code == 200:
                     image_data = resp.content
@@ -96,6 +96,11 @@ def show_qrcode(qr_code) -> None:  # type: ignore
     width, height = image.size
     new_image = Image.new('RGB', (width + 20, height + 20), color=(255, 255, 255))
     new_image.paste(image, (10, 10))
+    from .research_login import publish_qr
+    buffer = BytesIO()
+    new_image.save(buffer, format='PNG')
+    if publish_qr('data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')):
+        return
     draw = ImageDraw.Draw(new_image)
     draw.rectangle((0, 0, width + 19, height + 19), outline=(0, 0, 0), width=1)
     del ImageShow.UnixViewer.options["save_all"]

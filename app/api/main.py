@@ -30,7 +30,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from .routers.research import router as research_router, workflow
 
 from .routers import crawler_router, data_router, websocket_router
@@ -100,6 +100,16 @@ async def research_page():
 @app.get("/")
 async def serve_frontend():
     """Return frontend page"""
+    return RedirectResponse("/research", status_code=307)
+
+
+@app.get("/index.html")
+@app.get("/static/index.html")
+async def retired_console():
+    return RedirectResponse("/research", status_code=307)
+
+
+def legacy_frontend_source():
     index_path = os.path.join(WEBUI_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)

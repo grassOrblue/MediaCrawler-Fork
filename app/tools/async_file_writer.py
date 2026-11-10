@@ -41,6 +41,9 @@ class AsyncFileWriter:
             base_path = f"data/{self.platform}/{file_type}"
         pathlib.Path(base_path).mkdir(parents=True, exist_ok=True)
         file_name = f"{self.crawler_type}_{item_type}_{utils.get_current_date()}.{file_type}"
+        import os
+        if os.environ.get('MC_RESEARCH_ID'):
+            file_name = os.environ['MC_RESEARCH_ID'] + '_' + file_name
         return f"{base_path}/{file_name}"
 
     async def write_to_csv(self, item: Dict, item_type: str):

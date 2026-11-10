@@ -5,6 +5,7 @@ import html
 import json
 import math
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -87,15 +88,16 @@ def messages(instruction, data):
     return [{'role': 'system', 'content': SYSTEM + instruction}, {'role': 'user', 'content': encode(data)}]
 
 
-KEYWORDS = '''分析研究描述，输出 {"understanding":"目标理解","product":"产品","audience":"人群","scenes":["场景"],"questions":["需要澄清的问题"],"keywords":{"平台":[{"text":"产品 诉求词","reason":"理由"}]}}。
+KEYWORDS = '''同时判断采集类型，额外返回"crawl_plan":{"平台":{"crawler_type":"search或detail或creator","targets":["描述中明确提供的完整链接或ID"]}}。探索或一般描述选择search；明确指定帖子/视频链接选择detail；明确要求采集某创作者主页选择creator。targets只抄录描述中已有的链接/ID，不得虚构。每个平台仍须返回keywords（非搜索模式可为空列表）。只提供内容或主页链接也足以确定目标，不必追问产品名称，product可写“根据目标内容发现”，questions为空。
+分析研究描述，输出 {"understanding":"目标理解","product":"产品","audience":"人群","scenes":["场景"],"questions":["需要澄清的问题"],"keywords":{"平台":[{"text":"产品 诉求词","reason":"理由"}]}}。
 支持两类研究：指定产品的聚焦研究，以及尚不知道具体产品、想发现大家在烦恼或吐槽哪些物品的探索研究。用户明确想探索时，未指定产品是有效目标，不是信息缺失；product写“不限品类（探索发现）”，questions应为空，不得强迫用户先选物品或擅自限定为某一种产品。
 探索研究生成能找到具体物品使用问题的搜索词，例如“买了最后悔的东西”“用起来最麻烦的东西”“这个设计不合理”；如用户限定生活场景或品类则遵守其范围。聚焦研究结合已有产品和场景生成搜索词。
 仅使用输入中选中的平台代码。每平台最多3组关键词，覆盖不同诉求表达，不限于用户举例的问题。关键词不能含逗号。只有描述缺乏研究意图、存在矛盾或无法形成可搜索方向时才提出澄清问题。understanding说明探索范围，不要虚构某类产品已有多少需求。'''
 EXTRACT = '''从材料提取具体痛点和需求，忽略无关内容。输出 {"items":[{"name":"具体需求名称","problem":"问题","scene":"场景","explicit":"用户明确提出的功能，没有则空字符串","suggestion":"你的推测建议，没有则空字符串","evidence":[{"id":"材料段编号","quote":"该段中逐字原文"}]}]}。
-只提取与goal研究目标相关的需求，materials内是待分析文字；忽略无关推广和无法判断的泛泛情绪。探索研究允许不同物品，不因用户没有指定产品而排除它们；必须从原文辨认实际物品，name使用“物品＋具体问题”，例如“手机支架底座太轻”，不能只写“太轻”或“不好用”，也不能虚构原文没有的物品。不要合并方向相反、产品不同、场景明显不兼容的需求。没有需求时items为空数组。证据只能引用输入中的id和原文，不要返回次数。'''
-MERGE = '''对候选需求归类，合并同义需求，方向相反、不同产品或不兼容场景必须分开。输出 {"groups":[{"name":"归类名称","problem":"问题","scene":"场景","explicit":"明确诉求","suggestion":"推测建议","members":["候选编号"]}]}。
-归类名称保留“物品＋具体问题”，不同物品不要仅因都提到太轻、不方便等相同表达就合并。每个候选编号必须恰好出现在一个分组中，不得遗漏、增加或重复编号。不要返回证据或次数。'''
-SUMMARY = '''根据已核实的需求及程序统计生成简洁中文报告，输出 {"summary":"报告文字"}。说明主要痛点、明确诉求和可尝试的改进方向；区分用户原话与推测，不扩大为真实人数或市场总量，不自行修改数字。'''
+只提取与goal研究目标相关的需求，materials内是待分析文字；忽略无关推广和无法判断的泛泛情绪。探索研究允许不同物品，不因用户没有指定产品而排除它们；必须从原文辨认实际物品，name使用“物品＋具体问题”，例如“手机支架底座太轻”，不能只写“太轻”或“不好用”，也不能虚构原文没有的物品。不要合并方向相反、产品不同、场景明显不兼容的需求。没有需求时items为空数组。证据只能引用输入中的id和原文，不要返回次数。说明保持简洁，每个说明字段尽量不超过60字，quote只引用能证明问题的原文短句，尽量不超过80字，不要整段复述。'''
+MERGE = '''对候选需求归类，合并同义需求，方向相反、不同产品或不兼容场景必须分开。只输出 {"groups":[{"members":["候选编号"]}]}。
+每组只返回members编号，编号直接复制输入中的id，例如"0"和"1"，从0开始，不要重新编号。名称和说明由程序从原有候选保留，不要重复生成说明。不同物品不要仅因都提到太轻、不方便等相同表达就合并。每个候选编号必须恰好出现在一个分组中，不得遗漏、增加或重复编号。拿不准能否合并时使用单成员分组。不要返回证据或次数。'''
+SUMMARY = '''根据已核实的需求及程序统计生成简洁中文报告，输出 {"summary":"报告文字"}。说明主要痛点、明确诉求和可尝试的改进方向；区分用户原话与推测，不扩大为真实人数或市场总量，不自行修改数字。输入warnings非空时须说明部分归类仍待核对，同义需求可能分开计数。摘要尽量不超过1000字，不逐条复述全部需求。'''
 
 
 class NeedBudget(Exception):
@@ -149,7 +151,7 @@ class ResearchAI:
         if room < 512:
             raise ValueError('模型输入空间不足')
         # Bound each segment by UTF-8 bytes so no long text is silently truncated.
-        max_chars = max(100, min(2500, room // 4))
+        max_chars = max(100, min(2500, room // 4, cfg.max_output_tokens))
         for text, ids in groups.items():
             start = 0
             while start < len(text):
@@ -163,7 +165,9 @@ class ResearchAI:
         chunks, chunk = [], []
         for segment in segments:
             public = {'id': segment['id'], 'text': segment['text']}
-            if chunk and estimate_tokens(messages(EXTRACT, {'goal': goal, 'materials': chunk + [public]})) + cfg.max_output_tokens > cfg.context_tokens:
+            if chunk and (len(chunk) >= max(1, min(16, cfg.max_output_tokens // 256))
+                          or sum(len(s['text']) for s in chunk) + len(public['text']) > cfg.max_output_tokens
+                          or estimate_tokens(messages(EXTRACT, {'goal': goal, 'materials': chunk + [public]})) + cfg.max_output_tokens > cfg.context_tokens):
                 chunks.append(chunk)
                 chunk = []
             chunk.append(public)
@@ -183,7 +187,9 @@ class ResearchAI:
         # Merge and summary inputs are not yet known; reserve the extraction output envelope.
         count = sum(estimate_tokens(messages(EXTRACT, {'goal': payload['goal'], 'materials': c})) for c in chunks)
         count += len(chunks) * cfg.max_output_tokens * 2 + 4096
-        return self.store.create_job('analysis', payload, fingerprint(cfg), self.budget(cfg, count, len(chunks) + 2, len(payload['documents'])), rid)
+        candidates = len(chunks) * max(1, min(16, cfg.max_output_tokens // 256))
+        calls = len(chunks) + math.ceil(candidates / 25) + 1 + math.ceil(candidates / 20)
+        return self.store.create_job('analysis', payload, fingerprint(cfg), self.budget(cfg, count, calls, len(payload['documents'])), rid)
 
     def reestimate(self, jid):
         previous = self.store.job(jid)
@@ -192,17 +198,64 @@ class ResearchAI:
         cfg = self.configured()
         same = previous['config_hash'] == fingerprint(cfg)
         state = previous['state'] if same else {}
+        payload = previous['payload']
+        if same and previous['kind'] == 'analysis' and (state.get('finish_reason') == 'length' or previous['error'].startswith('AI 输出未完整结束')):
+            index = state.get('chunk_index', 0)
+            stage = state.get('stage', 'extract' if index < len(payload['chunks']) else 'merge')
+            if stage == 'extract' and index < len(payload['chunks']):
+                chunk = payload['chunks'][index]
+                if len(chunk) > 1:
+                    maximum = max(1, min(len(chunk) // 2, 16, cfg.max_output_tokens // 256))
+                    parts, part = [], []
+                    for segment in chunk:
+                        if part and (len(part) >= maximum or sum(len(s['text']) for s in part) + len(segment['text']) > cfg.max_output_tokens):
+                            parts.append(part)
+                            part = []
+                        part.append(segment)
+                    if part:
+                        parts.append(part)
+                else:
+                    segment = chunk[0]
+                    if len(segment['text']) < 100:
+                        raise ValueError('单条短材料仍达到输出上限，请提高“每次最大输出”后重新预估本批分析')
+                    original = next(s for s in payload['segments'] if s['id'] == segment['id'])
+                    middle = len(segment['text']) // 2
+                    parts = []
+                    for text in (segment['text'][:middle], segment['text'][middle:]):
+                        sid = 's' + str(len(payload['segments']) + 1)
+                        payload['segments'].append({'id': sid, 'text': text, 'sources': original['sources']})
+                        parts.append([{'id': sid, 'text': text}])
+                payload['chunks'][index:index + 1] = parts
+            elif stage == 'merge':
+                size = state.get('merge_size', 25)
+                if size <= 2:
+                    raise ValueError('两个候选的归类仍达到输出上限，请提高“每次最大输出”后重新预估本批分析')
+                state['merge_batch_size'] = max(2, size // 2)
+                state['force_reconcile'] = True
+            elif stage == 'summary':
+                size = state.get('summary_batch_size', 20)
+                if size <= 1:
+                    raise ValueError('单项摘要仍达到输出上限，请提高“每次最大输出”后重新预估本批分析')
+                state['summary_batch_size'] = max(1, size // 2)
+            state.pop('finish_reason', None)
         spent = state.get('reserved_tokens', 0)
-        budget = dict(previous['budget'])
-        budget.update(provider=cfg.provider, model=cfg.model)
-        budget['limit_tokens'] = max(budget['limit_tokens'] * 2, spent + cfg.context_tokens + cfg.max_output_tokens)
-        budget['additional_tokens'] = budget['limit_tokens'] - spent
-        budget['cost'] = None
-        budget['retry_note'] = '重试可能再次计费；超时请求可能已在服务商侧计费。保留同配置下已完成阶段。'
+        remaining = max(0, len(payload.get('chunks', [])) - state.get('chunk_index', 0))
+        if previous['kind'] == 'analysis':
+            candidates = len(state.get('candidates', [])) + remaining * max(1, min(16, cfg.max_output_tokens // 256))
+            calls = remaining + math.ceil(candidates / state.get('merge_batch_size', 25)) + 1 + math.ceil(candidates / 20)
+            inputs = sum(estimate_tokens(messages(EXTRACT, {'goal': payload['goal'], 'materials': c})) for c in payload['chunks'][state.get('chunk_index', 0):])
+            public = [{k: c[k] for k in ('name', 'problem', 'scene', 'explicit', 'suggestion')} for c in state.get('candidates', [])]
+            inputs += estimate_tokens(messages(MERGE, public)) * 2 + remaining * cfg.max_output_tokens * 2 + 4096
+        else:
+            calls, inputs = 1, estimate_tokens(messages(KEYWORDS, payload))
+        budget = self.budget(cfg, inputs, calls, previous['budget'].get('documents', 0))
+        budget['additional_tokens'] = budget['limit_tokens']
+        budget['limit_tokens'] += spent
+        budget['retry_note'] = '保留已完成阶段；输出截断时缩小失败分块或后续批量。预计调用次数会变化，重试需再次确认且可能再次计费。'
         # Config changes require rebuilding chunk sizes; keep the already frozen documents.
         if not same:
             raise ValueError('配置已变化；请重新预估关键词或本批分析，不能混用旧阶段结果')
-        return self.store.create_job(previous['kind'], previous['payload'], fingerprint(cfg), budget, previous['run_id'], state)
+        return self.store.create_job(previous['kind'], payload, fingerprint(cfg), budget, previous['run_id'], state)
 
     def confirm(self, jid):
         cfg = self.configured()
@@ -229,7 +282,13 @@ class ResearchAI:
             raw = response.json()
             choice = raw['choices'][0]
             if choice.get('finish_reason') not in (None, 'stop'):
-                return {'_response_error': 'AI 输出未完整结束，阶段结果未采用；请检查输出预算后重新预估'}, raw.get('usage') or {}
+                reason = choice.get('finish_reason')
+                errors = {'length': f'AI 输出达到单次长度限制（输出上限 {cfg.max_output_tokens} token），阶段结果未采用；重新预估会缩小失败分块，确认后再执行',
+                          'content_filter': 'AI 返回内容审核拦截，阶段结果未采用；请检查材料，不要仅增加输出预算',
+                          'tool_calls': 'AI 返回了工具调用而非需求报告，阶段结果未采用',
+                          'insufficient_system_resource': 'AI 服务商推理资源不足，阶段结果未采用；请稍后重新预估',
+                          'aborted': 'AI 服务商中断了生成，阶段结果未采用；请稍后重新预估'}
+                return {'_response_error': errors.get(reason, 'AI 未正常结束生成，阶段结果未采用'), '_finish_reason': reason if reason in errors else 'unknown'}, raw.get('usage') or {}
             text = choice['message']['content']
             if not isinstance(text, str):
                 return {'_response_error': 'AI 未返回文字 JSON'}, raw.get('usage') or {}
@@ -266,6 +325,8 @@ class ResearchAI:
             totals['estimated_calls'] += 1
         state['reserved_tokens'] += max(0, int(input_count + output_count) - reserved)
         state['pending_request'] = False
+        if isinstance(result, dict) and '_finish_reason' in result:
+            state['finish_reason'] = result['_finish_reason']
         self.store.update_job(job['id'], state=state)
         if isinstance(result, str):
             try:
@@ -285,9 +346,15 @@ class ResearchAI:
         for key in ('understanding', 'product', 'audience'):
             if not isinstance(result.get(key), str):
                 raise ValueError('关键词结果缺少目标说明')
+        plan = result.get('crawl_plan', {})
+        if not isinstance(plan, dict) or set(plan) - set(platforms):
+            raise ValueError('AI采集计划的平台无效')
+        for entry in plan.values():
+            if not isinstance(entry, dict) or entry.get('crawler_type') not in ('search', 'detail', 'creator') or not isinstance(entry.get('targets'), list) or any(not isinstance(v, str) for v in entry['targets']):
+                raise ValueError('AI采集计划格式无效')
         for p in platforms:
             words = result['keywords'].get(p, [])
-            if not isinstance(words, list) or len(words) > 3 or (not words and not result['questions']):
+            if not isinstance(words, list) or len(words) > 3 or (not words and not result['questions'] and result.get('crawl_plan', {}).get(p, {}).get('crawler_type', 'search') == 'search'):
                 raise ValueError('每个平台需要1至3组关键词，或明确提出澄清问题')
             for item in words:
                 if not isinstance(item, dict) or not isinstance(item.get('text'), str) or not item['text'].strip() or ',' in item['text'] or '，' in item['text'] or not isinstance(item.get('reason'), str):
@@ -317,7 +384,7 @@ class ResearchAI:
                 raise ValueError('AI需求缺少原文证据')
             for reference in item['evidence']:
                 sid, quote = reference.get('id'), reference.get('quote')
-                if sid not in allowed or not isinstance(quote, str) or not quote.strip() or quote not in segments[sid]['text']:
+                if sid not in allowed or not isinstance(quote, str) or not quote.strip() or quote not in next(s['text'] for s in chunk if s['id'] == sid):
                     raise ValueError('AI返回了无效证据编号或非原文片段，未采用此阶段')
                 for eid in segments[sid]['sources']:
                     doc = documents[eid]
@@ -327,27 +394,59 @@ class ResearchAI:
         return candidates
 
     async def merge(self, job, cfg, state, candidates):
+        state['stage'], state['merge_size'] = 'merge', len(candidates)
         public = [{'id': str(i), **{k: c[k] for k in ('name', 'problem', 'scene', 'explicit', 'suggestion')}} for i, c in enumerate(candidates)]
         result = await self.call(job, cfg, state, MERGE, public)
         if not isinstance(result, dict) or not isinstance(result.get('groups'), list):
             raise ValueError('AI需求归类格式无效')
-        used, merged = set(), []
+        expected = {v['id'] for v in public}
+        proposed, invalid, duplicates = [], 0, 0
         for group in result['groups']:
-            fields = self.fields(group)
-            members = group.get('members')
+            members = group.get('members') if isinstance(group, dict) else None
             if not isinstance(members, list) or not members:
-                raise ValueError('需求归类缺少候选编号')
+                invalid += 1
+                continue
+            normalized = []
+            for member in members:
+                if isinstance(member, int) and not isinstance(member, bool):
+                    member = str(member)
+                if not isinstance(member, str) or member not in expected:
+                    invalid += 1
+                elif member in normalized:
+                    duplicates += 1
+                else:
+                    normalized.append(member)
+            if normalized:
+                proposed.append(normalized)
+        occurrences = Counter(member for members in proposed for member in members)
+        conflicts = {member for member, count in occurrences.items() if count > 1}
+        missing = expected - set(occurrences)
+        partition = [[member for member in members if member not in conflicts] for members in proposed]
+        partition = [members for members in partition if members]
+        partition.extend([[member] for member in sorted(conflicts | missing, key=int)])
+        assigned = [member for members in partition for member in members]
+        if set(assigned) != expected or len(assigned) != len(expected):
+            raise ValueError('归类校验未能保证每个候选恰好出现一次，阶段结果未采用')
+        state['last_merge_check'] = {'candidates': len(candidates), 'invalid_entries': invalid, 'within_group_duplicates': duplicates,
+                                     'cross_group_conflicts': len(conflicts), 'missing_candidates': len(missing)}
+        if invalid or duplicates or conflicts or missing:
+            warning = (f'归类编号已校正：忽略无效项 {invalid} 个、去除组内重复 {duplicates} 个、'
+                       f'跨组冲突 {len(conflicts)} 个、遗漏 {len(missing)} 个。冲突和遗漏候选已独立保留，'
+                       '证据未丢弃；部分同义需求可能分开计数，请核对原文。')
+            if warning not in state.setdefault('grouping_warnings', []):
+                state['grouping_warnings'].append(warning)
+        merged = []
+        for members in partition:
             evidence = {}
             for member in members:
-                if not isinstance(member, str) or member not in {v['id'] for v in public} or member in used:
-                    raise ValueError('需求归类遗漏、重复或虚构了候选编号')
-                used.add(member)
                 for e in candidates[int(member)]['evidence']:
                     evidence[e['id']] = e
             lineage = sorted({origin for member in members for origin in candidates[int(member)].get('_lineage', [])})
+            fields = {'name': candidates[int(members[0])]['name']}
+            for key in ('problem', 'scene', 'explicit', 'suggestion'):
+                texts = [candidates[int(member)][key] for member in members]
+                fields[key] = '；'.join(dict.fromkeys(text for text in texts if text))
             merged.append({**fields, 'evidence': list(evidence.values()), '_lineage': lineage})
-        if used != {v['id'] for v in public}:
-            raise ValueError('需求归类遗漏了候选需求')
         return merged
 
     async def reconcile(self, job, cfg, state, groups):
@@ -358,7 +457,7 @@ class ResearchAI:
             if scan['current'] is None:
                 scan['current'] = {**groups[scan['index']], '_lineage': [marker]}
             while scan['offset'] < len(scan['acc']):
-                batch = scan['acc'][scan['offset']:scan['offset'] + 10]
+                batch = scan['acc'][scan['offset']:scan['offset'] + max(1, state.get('merge_batch_size', 11) - 1)]
                 while len(batch) > 1:
                     public = [{k: v for k, v in c.items() if k not in ('evidence', '_lineage')} for c in [scan['current']] + batch]
                     if estimate_tokens(messages(MERGE, public)) + cfg.max_output_tokens + 1000 <= cfg.context_tokens:
@@ -386,6 +485,7 @@ class ResearchAI:
             payload = job['payload']
             for index in range(state.get('chunk_index', 0), len(payload['chunks'])):
                 chunk = payload['chunks'][index]
+                state['stage'] = 'extract'
                 raw = await self.call(job, cfg, state, EXTRACT, {'goal': payload['goal'], 'materials': chunk})
                 state.setdefault('candidates', []).extend(self.extracted(raw, chunk, payload))
                 state['chunk_index'] = index + 1
@@ -393,15 +493,16 @@ class ResearchAI:
             candidates = state.get('candidates', [])
             # Merge bounded batches, then reconcile all batch groups. Evidence stays local.
             if 'merged' not in state:
-                for start in range(state.get('merge_index', 0), len(candidates), 25):
-                    group = candidates[start:start + 25]
+                while state.get('merge_index', 0) < len(candidates):
+                    start = state.get('merge_index', 0)
+                    group = candidates[start:start + state.get('merge_batch_size', 25)]
                     merged = await self.merge(job, cfg, state, group) if len(group) > 1 else group
                     state.setdefault('batch_groups', []).extend(merged)
-                    state['merge_index'] = start + 25
+                    state['merge_index'] = start + len(group)
                     self.store.update_job(jid, state=state)
                 groups = state.get('batch_groups', [])
                 public = [{k: v for k, v in g.items() if k not in ('evidence', '_lineage')} for g in groups]
-                if estimate_tokens(messages(MERGE, public)) + cfg.max_output_tokens + 1000 > cfg.context_tokens:
+                if state.get('force_reconcile') or len(groups) * 32 > cfg.max_output_tokens or estimate_tokens(messages(MERGE, public)) + cfg.max_output_tokens + 1000 > cfg.context_tokens:
                     state['merged'] = await self.reconcile(job, cfg, state, groups)
                 else:
                     state['merged'] = await self.merge(job, cfg, state, groups) if len(groups) > 1 else groups
@@ -416,10 +517,11 @@ class ResearchAI:
                 stats = [{k: d[k] for k in ('name', 'problem', 'scene', 'explicit', 'suggestion', 'mentions', 'posts', 'platforms')} for d in demands]
                 while state.get('summary_index', 0) < len(stats):
                     start = state.get('summary_index', 0)
-                    batch = stats[start:start + 20]
-                    while len(batch) > 1 and estimate_tokens(messages(SUMMARY, batch)) + cfg.max_output_tokens > cfg.context_tokens:
+                    state['stage'] = 'summary'
+                    batch = stats[start:start + state.get('summary_batch_size', 20)]
+                    while len(batch) > 1 and estimate_tokens(messages(SUMMARY, {'demands': batch, 'warnings': state.get('grouping_warnings', [])})) + cfg.max_output_tokens > cfg.context_tokens:
                         batch = batch[:len(batch)//2]
-                    result = await self.call(job, cfg, state, SUMMARY, batch)
+                    result = await self.call(job, cfg, state, SUMMARY, {'demands': batch, 'warnings': state.get('grouping_warnings', [])})
                     summary = result.get('summary')
                     if not isinstance(summary, str) or not summary.strip():
                         raise ValueError('AI汇总格式无效')
@@ -429,7 +531,7 @@ class ResearchAI:
                 summary = '\n\n'.join(state['summaries'])
             else:
                 summary = '本批没有足够有效需求证据。'
-            self.store.save_report(jid, demands, summary, state.get('usage', {}))
+            self.store.save_report(jid, demands, summary, state.get('usage', {}), state.get('grouping_warnings', []))
         except NeedBudget:
             self.store.update_job(jid, status='needs_budget', state=state, error='后续阶段将超过已确认预算，已暂停；重新预估并确认后继续')
         except asyncio.CancelledError:

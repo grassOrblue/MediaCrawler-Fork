@@ -224,6 +224,9 @@ class DouYinCrawler(AbstractCrawler):
     async def get_aweme_detail(self, aweme_id: str, semaphore: asyncio.Semaphore) -> Any:
         """Get note detail"""
         async with semaphore:
+            from tools import research_capture
+            if not research_capture.detail_allowed('dy', aweme_id):
+                return None
             try:
                 result = await self.dy_client.get_video_by_id(aweme_id)
                 # Sleep after fetching aweme detail
@@ -241,7 +244,10 @@ class DouYinCrawler(AbstractCrawler):
         """
         Batch get note comments
         """
+        from tools import research_capture
+        aweme_list = research_capture.new_ids('dy', aweme_list)
         if not config.ENABLE_GET_COMMENTS:
+            research_capture.complete('dy', aweme_list)
             utils.logger.info(f"[DouYinCrawler.batch_get_note_comments] Crawling comment mode is not enabled")
             return
 
@@ -270,6 +276,8 @@ class DouYinCrawler(AbstractCrawler):
                     callback=douyin_store.batch_update_dy_aweme_comments,
                     max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                 )
+                from tools import research_capture
+                research_capture.complete('dy', [aweme_id])
                 # Sleep after fetching comments
                 await asyncio.sleep(crawl_interval)
                 utils.logger.info(f"[DouYinCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for aweme {aweme_id}")
@@ -288,6 +296,9 @@ class DouYinCrawler(AbstractCrawler):
         utils.logger.info("[DouYinCrawler.get_creators_and_videos] Parsing creator URLs...")
 
         for creator_url in config.DY_CREATOR_ID_LIST:
+            from tools import research_capture
+            if research_capture.exhausted():
+                break
             try:
                 creator_info_parsed = parse_creator_info_from_url(creator_url)
                 user_id = creator_info_parsed.sec_user_id

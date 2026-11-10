@@ -186,3 +186,6 @@ database/*.db
 .omx/
 config/ai.local.json
 config/ai.local.json.tmp
+
+config/capture.local.json
+config/capture.local.json.tmp

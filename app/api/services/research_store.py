@@ -34,8 +34,9 @@ class ResearchStore:
         path = home / 'library.sqlite3'
         if path.exists():
             with sqlite3.connect(path) as source:
-                if not source.execute("SELECT 1 FROM sqlite_master WHERE name='research_runs'").fetchone():
-                    backup = home / ('library.before-research-' + str(now()) + '.sqlite3')
+                migration = 'research' if not source.execute("SELECT 1 FROM sqlite_master WHERE name='research_runs'").fetchone() else 'resume' if not source.execute("SELECT 1 FROM sqlite_master WHERE name='research_work'").fetchone() else ''
+                if migration:
+                    backup = home / (f'library.before-{migration}-' + str(now()) + '.sqlite3')
                     with sqlite3.connect(backup) as target:
                         source.backup(target)
         self.library = LibraryStore(data_dir or ROOT / 'data', home, ROOT / 'database/sqlite_tables.db')
@@ -52,6 +53,11 @@ class ResearchStore:
                     failures INTEGER DEFAULT 0,reason TEXT DEFAULT '',PRIMARY KEY(run_id,platform));
                 CREATE TABLE IF NOT EXISTS research_seen(
                     run_id TEXT,platform TEXT,post_id TEXT,PRIMARY KEY(run_id,platform,post_id));
+                CREATE TABLE IF NOT EXISTS research_work(
+                    run_id TEXT,platform TEXT,post_id TEXT,keyword TEXT,data TEXT,status TEXT,
+                    PRIMARY KEY(run_id,platform,post_id));
+                CREATE TABLE IF NOT EXISTS research_checkpoints(
+                    run_id TEXT,platform TEXT,key TEXT,data TEXT,PRIMARY KEY(run_id,platform,key));
                 CREATE TABLE IF NOT EXISTS research_items(
                     run_id TEXT,platform TEXT,kind TEXT,item_id TEXT,post_id TEXT,is_new INTEGER,
                     PRIMARY KEY(run_id,platform,kind,item_id));
@@ -137,7 +143,45 @@ class ResearchStore:
         with self.connect() as db:
             db.execute('UPDATE research_platforms SET failures=failures+1 WHERE run_id=? AND platform=?', (rid, platform))
 
-    def candidate(self, rid, platform, pid, keyword, limit):
+    def checkpoint(self, rid, platform, key, value=None):
+        with self.connect() as db:
+            if value is not None:
+                db.execute('INSERT OR REPLACE INTO research_checkpoints VALUES(?,?,?,?)', (rid, platform, key, encode(value)))
+                return value
+            row = db.execute('SELECT data FROM research_checkpoints WHERE run_id=? AND platform=? AND key=?', (rid, platform, key)).fetchone()
+            return json.loads(row[0]) if row else {}
+
+    def finish_item(self, rid, platform, pid):
+        with self.connect() as db:
+            db.execute("UPDATE research_work SET status='completed' WHERE run_id=? AND platform=? AND post_id=?", (rid, platform, str(pid)))
+
+    def retry_items(self, rid, platform):
+        with self.connect() as db:
+            return [dict(row) | {'data': json.loads(row['data'])} for row in db.execute("SELECT * FROM research_work WHERE run_id=? AND platform=? AND status='retry'", (rid, platform))]
+
+    def resume_run(self, rid):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT status,config FROM research_runs WHERE id=?', (rid,)).fetchone()
+            if not row or row['status'] not in ('failed', 'partial', 'interrupted', 'stopped'):
+                raise ValueError('只有失败、部分未完成、中断或停止的批次可以继续')
+            tasks = db.execute("SELECT platform FROM research_platforms WHERE run_id=? AND status NOT IN ('completed','skipped')", (rid,)).fetchall()
+            if not tasks:
+                raise ValueError('本批没有需要继续的平台')
+            for task in tasks:
+                platform = task['platform']
+                # Older batches have no item checkpoints; replay IDs while retaining their saved content.
+                for item in db.execute('SELECT s.post_id,i.is_new FROM research_seen s LEFT JOIN research_items i ON i.run_id=s.run_id AND i.platform=s.platform AND i.kind=\'post\' AND i.item_id=s.post_id WHERE s.run_id=? AND s.platform=?', (rid, platform)).fetchall():
+                    pid = item['post_id']
+                    db.execute('INSERT OR IGNORE INTO research_work VALUES(?,?,?,?,?,?)', (rid, platform, pid, '', encode({'id':pid,'aweme_id':pid,'aid':pid}), 'completed' if item['is_new'] == 0 else 'pending'))
+                db.execute("UPDATE research_work SET status='retry' WHERE run_id=? AND platform=? AND status!='completed'", (rid, platform))
+                db.execute("UPDATE research_platforms SET status='waiting',ended_at=NULL,reason='' WHERE run_id=? AND platform=?", (rid, platform))
+            config = json.loads(row['config'])
+            config['resumed_at'] = now()
+            db.execute("UPDATE research_runs SET status='running',ended_at=NULL,error='',config=? WHERE id=?", (encode(config), rid))
+        return self.run(rid)
+
+    def candidate(self, rid, platform, pid, keyword, limit, data=None):
         """Reserve a bounded unique candidate before requesting its detail/comments."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -152,12 +196,17 @@ class ResearchStore:
             exists = db.execute('SELECT 1 FROM posts WHERE platform=? AND post_id=?', (platform, pid)).fetchone()
             seen = db.execute('SELECT 1 FROM research_seen WHERE run_id=? AND platform=? AND post_id=?', (rid, platform, pid)).fetchone()
             if seen:
+                work = db.execute('SELECT status FROM research_work WHERE run_id=? AND platform=? AND post_id=?', (rid, platform, pid)).fetchone()
+                if work and work['status'] == 'retry':
+                    db.execute("UPDATE research_work SET status='pending' WHERE run_id=? AND platform=? AND post_id=?", (rid, platform, pid))
+                    return True
                 if exists:
                     db.execute('INSERT OR IGNORE INTO keywords VALUES(?,?,?)', (platform, pid, keyword))
                 return False
-            if task['checked'] >= limit:
+            if limit and task['checked'] >= limit:
                 return False
             db.execute('INSERT INTO research_seen VALUES(?,?,?)', (rid, platform, pid))
+            db.execute('INSERT OR IGNORE INTO research_work VALUES(?,?,?,?,?,?)', (rid, platform, pid, keyword, encode(data or {}), 'completed' if exists else 'pending'))
             db.execute('UPDATE research_platforms SET checked=checked+1,old_posts=old_posts+? WHERE run_id=? AND platform=?', (int(bool(exists)), rid, platform))
             if exists:
                 db.execute('INSERT OR IGNORE INTO research_items VALUES(?,?,?,?,?,0)', (rid, platform, 'post', pid, pid))
@@ -247,12 +296,12 @@ class ResearchStore:
             if not changed:
                 raise ValueError('预算已失效或任务已执行，请重新预估')
 
-    def save_report(self, jid, demands, summary, usage):
+    def save_report(self, jid, demands, summary, usage, warnings=None):
         with self.connect() as db:
             for index, demand in enumerate(demands):
                 did = str(index + 1)
                 db.execute('INSERT INTO research_demands VALUES(?,?,?,?)', (jid, did, demand['name'], encode(demand)))
                 for evidence in demand['evidence']:
                     db.execute('INSERT INTO research_evidence VALUES(?,?,?,?)', (jid, did, evidence['id'], encode(evidence)))
-            result = {'demands': demands, 'summary': summary, 'usage': usage}
+            result = {'demands': demands, 'summary': summary, 'usage': usage, 'warnings': warnings or []}
             db.execute("UPDATE research_jobs SET status='completed',result=?,updated_at=? WHERE id=?", (encode(result), now(), jid))

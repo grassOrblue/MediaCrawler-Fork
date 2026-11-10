@@ -122,7 +122,11 @@ class CrawlerManager:
                 cmd = [sys.executable, 'main.py', *cmd[4:]]
 
             # Log start information
-            entry = self._create_log_entry(f"Starting crawler: {' '.join(cmd)}", "info")
+            safe_cmd = list(cmd)
+            for index, argument in enumerate(cmd[:-1]):
+                if argument == '--cookies':
+                    safe_cmd[index + 1] = '[已隐藏]'
+            entry = self._create_log_entry(f"Starting crawler: {' '.join(safe_cmd)}", "info")
             await self._push_log(entry)
 
             try:

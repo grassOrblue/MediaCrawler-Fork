@@ -20,6 +20,7 @@
 
 import asyncio
 import functools
+import os
 import sys
 from typing import Optional
 
@@ -32,6 +33,7 @@ import config
 from base.base_crawler import AbstractLogin
 from cache.cache_factory import CacheFactory
 from tools import utils
+from tools.research_login import research_qr
 
 
 class DouYinLogin(AbstractLogin):
@@ -50,6 +52,7 @@ class DouYinLogin(AbstractLogin):
         self.scan_qrcode_time = 60
         self.cookie_str = cookie_str
 
+    @research_qr
     async def begin(self):
         """
             Start login douyin website
@@ -133,7 +136,10 @@ class DouYinLogin(AbstractLogin):
             sys.exit()
 
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
+        if os.environ.get('MC_RESEARCH_LOGIN'):
+            partial_show_qrcode()
+        else:
+            asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
         await asyncio.sleep(2)
 
     async def login_by_mobile(self):
